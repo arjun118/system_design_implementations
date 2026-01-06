@@ -1,0 +1,106 @@
+package main
+
+// my initial rusty version
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"math"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+)
+
+// predefined capacity of the bucket
+//
+// input params
+// 		bucket capacity
+// 		refill rate - number of reqs allowed per second (those number of tokens are put in the bucket every second)
+
+// lets only map by IP for now.
+// for each new IP we create a bucket
+type Bucket struct {
+	size    int
+	channel chan struct{}
+	// tbf
+}
+
+var (
+	mu    sync.Mutex
+	store = make(map[string]Bucket)
+)
+
+var (
+	bucketSize int
+	refillRate int
+)
+
+func handleHome(w http.ResponseWriter, r *http.Request) {
+	fmt.Println(r.RemoteAddr)
+	w.Write([]byte("hey there"))
+}
+
+func refill(bucket Bucket) {
+	for range time.Tick(time.Second) {
+		if len(bucket.channel) < bucket.size {
+			for range int(math.Min(
+				float64(cap(bucket.channel)-len(bucket.channel)),
+				float64(refillRate),
+			)) {
+				bucket.channel <- struct{}{}
+			}
+		}
+	}
+}
+
+func bucketCheckerMiddleware(next http.Handler) http.Handler {
+	// HandlerFunc implements Handler
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := r.RemoteAddr
+		host, _, _ := net.SplitHostPort(ip)
+		mu.Lock()
+		// only lock when getting or creating the bucket
+		bucket, ok := store[string(host)]
+		if !ok {
+			ch := make(chan struct{}, bucketSize)
+			for range bucketSize {
+				ch <- struct{}{}
+			}
+			bucket = Bucket{size: bucketSize, channel: ch}
+			store[host] = bucket
+			go refill(bucket)
+		}
+		mu.Unlock()
+		select {
+		case <-bucket.channel:
+			// if available then process the request
+			// and consume one token
+			next.ServeHTTP(w, r)
+		default:
+			// if not available
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte("rate limit hit"))
+		}
+	})
+}
+
+// we create a server and stimulate token bucket algo
+// for every new connection if it doesnot exist in the map
+// lets create a new instance of Bucket for that IP
+func main() {
+	flag.IntVar(&bucketSize, "size", 50, "size/capacity of the bucket")
+	flag.IntVar(&refillRate, "rate", 10, "refill rate of the bucket")
+
+	flag.Parse()
+
+	fmt.Println("bucket size: ", bucketSize)
+	fmt.Println("refill rate: ", refillRate)
+
+	mux := http.NewServeMux()
+	// middleware for initiating
+	mux.Handle("/", bucketCheckerMiddleware(http.HandlerFunc(handleHome)))
+	log.Fatal(http.ListenAndServe("localhost:8081", mux))
+
+}
