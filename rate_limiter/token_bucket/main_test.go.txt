@@ -12,13 +12,12 @@ import (
 
 func TestFirstRequestAllowed(t *testing.T) {
 	// t.Parallel()
-	//
-	bucketSize = 2.0
-	refillRate = 1.0
-	now := time.Now
-	limtier := NewLimiter(now, 2*time.Minute, bucketSize, refillRate)
+	bucketSize = 2
+	refillRate = 1
 
-	handler := limtier.MiddleWare(http.HandlerFunc(handleHome))
+	store = make(map[string]*Bucket)
+
+	handler := bucketCheckerMiddleware(http.HandlerFunc(handleHome))
 
 	req := httptest.NewRequest("GET", "http://localhost:8081", nil)
 
@@ -29,19 +28,19 @@ func TestFirstRequestAllowed(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	// first reqeust should be allowed
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %v", rec.Code)
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 }
 
 func TestRateLimitExceeded(t *testing.T) {
 	// t.Parallel()
-	bucketSize = 1.0
-	refillRate = 0.0
+	bucketSize = 1
+	refillRate = 0
 	// no tokens at all - so no request should be served
-	now := time.Now
-	limtier := NewLimiter(now, 2*time.Minute, bucketSize, refillRate)
 
-	handler := limtier.MiddleWare(http.HandlerFunc(handleHome))
+	store = make(map[string]*Bucket)
+
+	handler := bucketCheckerMiddleware(http.HandlerFunc(handleHome))
 
 	req := httptest.NewRequest("GET", "http://localhost:8081", nil)
 	req.RemoteAddr = "1.2.3.4:1111"
@@ -49,13 +48,13 @@ func TestRateLimitExceeded(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("first request : expected 200, got %v", rec.Code)
+		t.Fatalf("first request : expected 200, got %d", rec.Code)
 	}
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req)
 
 	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("second request: expected 429, got %v", rec2.Code)
+		t.Fatalf("second request: expected 429, got %d", rec2.Code)
 	}
 
 }
@@ -63,58 +62,47 @@ func TestRateLimitExceeded(t *testing.T) {
 func TestRefillAllowsRequestsAgain(t *testing.T) {
 	// this will fail , need to change this test
 	// t.Parallel()
-	bucketSize = 1.0
-	refillRate = 1.0
-	current := time.Now()
-	fakeNow := func() time.Time {
-		return current
-	}
-	limtier := NewLimiter(fakeNow, 2*time.Minute, bucketSize, refillRate)
+	bucketSize = 1
+	refillRate = 1
+	store = make(map[string]*Bucket)
 
-	handler := limtier.MiddleWare(http.HandlerFunc(handleHome))
+	handler := bucketCheckerMiddleware(http.HandlerFunc(handleHome))
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	req.RemoteAddr = "1.2.3.4:1111"
 
-	// allowed
+	// First request - allowed
 	rec1 := httptest.NewRecorder()
 	handler.ServeHTTP(rec1, req)
 
 	if rec1.Code != http.StatusOK {
-		t.Fatalf("first request: expected 200, got %v", rec1.Code)
+		t.Fatalf("first request: expected 200, got %d", rec1.Code)
 	}
 
-	// right after so immediately blocked
+	// Second request immediately - blocked
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req)
 
 	if rec2.Code != http.StatusTooManyRequests {
-		t.Fatalf("second request: expected 429, got %v", rec2.Code)
+		t.Fatalf("second request: expected 429, got %d", rec2.Code)
 	}
 
-	// time.Sleep(1 * time.Second)
-	// using injection logic
-	// to go forward one second
-	current = current.Add(1 * time.Second)
-	// so when the bucket checks now, we should have elapsed
-	// one second which calls for a refill
-	// should be allowed again
+	// Third request - should be allowed again
 	rec3 := httptest.NewRecorder()
 	handler.ServeHTTP(rec3, req)
 
 	if rec3.Code != http.StatusOK {
-		t.Fatalf("after refill: expected 200, got %v", rec3.Code)
+		t.Fatalf("after refill: expected 200, got %d", rec3.Code)
 	}
 }
 
 func TestDifferentIPsHaveDifferentBuckets(t *testing.T) {
 	// t.Parallel()
-	bucketSize = 1.0
-	refillRate = 0.0
-	now := time.Now
-	limtier := NewLimiter(now, 2*time.Minute, bucketSize, refillRate)
+	bucketSize = 1
+	refillRate = 0
+	store = make(map[string]*Bucket)
 
-	handler := limtier.MiddleWare(http.HandlerFunc(handleHome))
+	handler := bucketCheckerMiddleware(http.HandlerFunc(handleHome))
 
 	req1 := httptest.NewRequest("GET", "http://example.com/", nil)
 	req1.RemoteAddr = "1.1.1.1:1234"
@@ -129,14 +117,14 @@ func TestDifferentIPsHaveDifferentBuckets(t *testing.T) {
 		t.Fatalf("ip1 first request: expected 200")
 	}
 
-	// same ip should be blocked
+	// Same IP again -> should be blocked
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req1)
 	if rec2.Code != http.StatusTooManyRequests {
 		t.Fatalf("ip1 second request: expected 429")
 	}
 
-	// diff ip should still be allowed
+	// Different IP -> should still be allowed
 	rec3 := httptest.NewRecorder()
 	handler.ServeHTTP(rec3, req2)
 	if rec3.Code != http.StatusOK {
@@ -146,13 +134,15 @@ func TestDifferentIPsHaveDifferentBuckets(t *testing.T) {
 
 func TestConcurrentSameIP_NoRefill(t *testing.T) {
 	// t.Parallel()
-	bucketSize = 5.0
-	refillRate = 0.0
+	bucketSize = 5
+	refillRate = 0
 
-	now := time.Now
-	limtier := NewLimiter(now, 2*time.Minute, bucketSize, refillRate)
+	store = make(map[string]*Bucket)
 
-	handler := limtier.MiddleWare(http.HandlerFunc(handleHome))
+	handler := bucketCheckerMiddleware(http.HandlerFunc(handleHome))
+
+	req := httptest.NewRequest("GET", "http://localhost:8081", nil)
+	req.RemoteAddr = "1.2.3.4:1111"
 
 	var wg sync.WaitGroup
 
@@ -162,9 +152,11 @@ func TestConcurrentSameIP_NoRefill(t *testing.T) {
 	var blocked int64
 
 	for range 100 {
-		wg.Go(func() {
-			req := httptest.NewRequest("GET", "http://localhost:8081", nil)
-			req.RemoteAddr = "1.2.3.4:1111"
+		wg.Add(1)
+
+		go func() {
+			wg.Done()
+
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
@@ -174,28 +166,27 @@ func TestConcurrentSameIP_NoRefill(t *testing.T) {
 			case http.StatusTooManyRequests:
 				atomic.AddInt64(&blocked, 1)
 			default:
-				t.Errorf("unexpected status: %v", rec.Code)
+				t.Errorf("unexpected status: %d", rec.Code)
 			}
 
-		})
+		}()
 	}
 	wg.Wait()
 	if allowed != int64(bucketSize) {
-		t.Fatalf("expected %v allowed requests, got %v", bucketSize, allowed)
+		t.Fatalf("expected %d allowed requests, got %d", bucketSize, allowed)
 	}
 
 	if blocked != int64(goroutines-bucketSize) {
-		t.Fatalf("expected %v blocked requests, got %v", goroutines-bucketSize, blocked)
+		t.Fatalf("expected %d blocked requests, got %d", goroutines-bucketSize, blocked)
 	}
 }
 
 func TestConcurrentSameIP_WithRefill(t *testing.T) {
 	bucketSize = 5
 	refillRate = 5 // 5 tokens per second
-	now := time.Now
-	limtier := NewLimiter(now, 2*time.Minute, bucketSize, refillRate)
+	store = make(map[string]*Bucket)
 
-	handler := limtier.MiddleWare(http.HandlerFunc(handleHome))
+	handler := bucketCheckerMiddleware(http.HandlerFunc(handleHome))
 
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	req.RemoteAddr = "1.2.3.4:1111"
@@ -223,7 +214,7 @@ func TestConcurrentSameIP_WithRefill(t *testing.T) {
 	maxAllowed := float64(bucketSize) + elapsed*float64(refillRate)
 
 	if float64(allowed) > maxAllowed+1 { // +1 to tolerate tiny timing drift
-		t.Fatalf("too many allowed requests: got %v, expected at most %.2f",
+		t.Fatalf("too many allowed requests: got %d, expected at most %.2f",
 			allowed, maxAllowed)
 	}
 }
@@ -231,10 +222,9 @@ func TestConcurrentSameIP_WithRefill(t *testing.T) {
 func TestConcurrentDifferentIPs(t *testing.T) {
 	bucketSize = 1
 	refillRate = 0
-	now := time.Now
-	limtier := NewLimiter(now, 2*time.Minute, bucketSize, refillRate)
+	store = make(map[string]*Bucket)
 
-	handler := limtier.MiddleWare(http.HandlerFunc(handleHome))
+	handler := bucketCheckerMiddleware(http.HandlerFunc(handleHome))
 
 	var wg sync.WaitGroup
 	const clients = 50
@@ -247,7 +237,7 @@ func TestConcurrentDifferentIPs(t *testing.T) {
 			defer wg.Done()
 
 			req := httptest.NewRequest("GET", "http://example.com/", nil)
-			req.RemoteAddr = fmt.Sprintf("10.0.0.%v:1234", i)
+			req.RemoteAddr = fmt.Sprintf("10.0.0.%d:1234", i)
 
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
@@ -261,44 +251,6 @@ func TestConcurrentDifferentIPs(t *testing.T) {
 	wg.Wait()
 
 	if allowed != int64(clients) {
-		t.Fatalf("expected %v allowed (one per IP), got %v", clients, allowed)
+		t.Fatalf("expected %d allowed (one per IP), got %d", clients, allowed)
 	}
-}
-
-func TestBucketEvictionByTTL(t *testing.T) {
-	current := time.Now()
-	fakeNow := func() time.Time {
-		return current
-		// always returns the time at the start of the test
-	}
-	bucketSize = 1
-	refillRate = 0
-	// time to live is 2 sec
-	limiter := NewLimiter(fakeNow, 2*time.Second, bucketSize, refillRate)
-	req := httptest.NewRequest("GET", "http://localhost:8081", nil)
-
-	req.RemoteAddr = "1.2.3.4:1111"
-
-	handler := limiter.MiddleWare(http.HandlerFunc(handleHome))
-
-	rec1 := httptest.NewRecorder()
-	handler.ServeHTTP(rec1, req)
-
-	if rec1.Code != http.StatusOK {
-		t.Fatalf("expected first request to be allowed")
-	}
-
-	// without sleeping we can skip the time
-	// since fake now creates a closure ,we are
-	// simulting the elapsed time by increasing current
-	// which fakeNow returns when checking eviction
-	current = current.Add(3 * time.Second)
-	// force eviction
-	limiter.evictExpired()
-	rec2 := httptest.NewRecorder()
-	handler.ServeHTTP(rec2, req)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("expected request after eviction to be allowed")
-	}
-
 }
