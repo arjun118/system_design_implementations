@@ -1,5 +1,18 @@
 # notes
 
+## token bucket algo
+
+- a container that has a predefined capacity
+- tokens are put in the bucket at a preset rates, periodically
+- once bucket is full, no more tokens are added
+- each request consumes one token
+  - when req arrives, we check if there are enough tokens in the bucket
+    - yes: we take one token out and process the request
+    - no: request is dropped
+    
+    
+
+
 ## Mutex usage and correctness
 1. lock only to access shared data structured (map here)
 2. never lock while doing request handling or blocking operations
