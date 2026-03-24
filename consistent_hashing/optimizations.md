@@ -4,3 +4,7 @@
 # wrap the app in a cli
 - good distribution visualization
 - learn to use bubble tea and lipgloss
+# remove server
+- current complexity: O(V * N)
+- to be approach: rebuild approach (need to study about this)
+# remove duplicate rehashing (by storing more)

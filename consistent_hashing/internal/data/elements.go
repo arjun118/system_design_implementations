@@ -51,7 +51,7 @@ func (ch *ConsistentHasher) Get(key string) string {
 	return serverName
 }
 
-func (ch *ConsistentHasher) AddServer(key string) bool {
+func (ch *ConsistentHasher) AddServer() bool {
 	// add a server to this hasher
 	nextServerid := ch.nextServerId
 	serverName := fmt.Sprintf("Server_%d", nextServerid)
@@ -82,8 +82,33 @@ func (ch *ConsistentHasher) AddServer(key string) bool {
 	return true
 }
 
-func (ch *ConsistentHasher) RemoveServer(key string) {
-	// add a server to this hasher
+func (ch *ConsistentHasher) RemoveServer(serverID int) bool {
+	// remove a server and its virtual nodes from the ring
+	if _, ok := ch.Servers[serverID]; !ok {
+		return false
+	}
+	serverName := fmt.Sprintf("Server_%d", serverID)
+	for i := range ch.VirtualNodesPerServer {
+		virtualNodeName := fmt.Sprintf("%s#VN_%d", serverName, i+1)
+		virtualNodeHash := ch.GetHash(virtualNodeName)
+		// remove the virtualNodeHash from nodemap
+		delete(ch.NodeMap, virtualNodeHash)
+		// remove the hash from hashring
+		idx := sort.Search(len(ch.HashRing), func(i int) bool {
+			return ch.HashRing[i] >= virtualNodeHash
+		})
+		// delete from hash ring if it is a valid index
+		if idx < len(ch.HashRing) && ch.HashRing[idx] == virtualNodeHash {
+			ch.HashRing = slices.Delete(ch.HashRing, idx, idx+1)
+		}
+	}
+	// remove from server map
+	delete(ch.Servers, serverID)
+	return true
+}
+
+func (ch *ConsistentHasher) Visualize() {
+
 }
 
 func (ch *ConsistentHasher) GetHash(key string) uint32 {
