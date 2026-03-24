@@ -5,72 +5,48 @@ import (
 	"fmt"
 	"log"
 	"slices"
-	"sort"
 
 	"arjun118.github.io/consistent_hashing/internal/data"
 )
 
 var (
 	CacheServers int
-	VirtualNodes int //per server
+	VirtualNodes int
 )
 
-func HandleKeyAddition(key string, hashring *data.Ring) {
-	// get the hash
-	hash := data.GetHash(key)
-	// add the key's hash to the hash space i.e hash ring
-	*hashring = append(*hashring, hash)
-	// sort after addition of the new key so that we can do search easily
-	slices.Sort(*hashring)
-	fmt.Println("key added")
-
-}
-
-func FetchKey(key string, hashring *data.Ring, nodemap *data.NodeMap) {
-	// get the hash
-	hash := data.GetHash(key)
-	idx := sort.Search(len(*hashring), func(i int) bool {
-		return (*hashring)[i] >= hash
-	})
-	if idx == len(*hashring) {
-		idx = 0 // wrap around (consistent hashing ring)
-	}
-	fmt.Println("idx: ", idx)
-	virtualNodeHash := (*hashring)[idx]
-	virtualNodeName := (*nodemap)[virtualNodeHash]
-	fmt.Println(virtualNodeHash, virtualNodeName)
-	fmt.Printf("the key %s is present on %s server", key, virtualNodeName)
-}
-
 func main() {
-	HashRing := make(data.Ring, 0)
-	NodeMap := make(data.NodeMap)
-
+	consistentHasher := data.GetNewHasher()
 	flag.IntVar(&CacheServers, "servers", 4, "initial number of cache servers")
-	flag.IntVar(&VirtualNodes, "virtual_nodes", 50, "number of virtual nodes per server")
-	Servers := []string{}
+	flag.IntVar(&VirtualNodes, "virtual", 100, "number of virtual nodes per server")
+	flag.Parse()
+	consistentHasher.VirtualNodesPerServer = VirtualNodes
 	for i := range CacheServers {
-		Servers = append(Servers, string(i+65))
+		consistentHasher.Servers[i+1] = data.Server{ID: i + 1, Name: fmt.Sprintf("Server_%d", i+1)}
 	}
-	fmt.Println("initial servers: ", Servers)
-
-	// virtualnodes := []string{}
-	for _, cacheserver := range Servers {
-		for vn := range VirtualNodes {
-			VirtualNodeName := fmt.Sprintf("Server_%s_%d", cacheserver, vn+1)
-			VirtualNodeHash := data.GetHash(VirtualNodeName)
+	fmt.Printf("Initilaizing the hash ring with %d servers...\n", CacheServers)
+	fmt.Printf("Adding %d virtual nodes per each server...\n", consistentHasher.VirtualNodesPerServer)
+	for serverID, serverStruct := range consistentHasher.Servers {
+		for vn := range consistentHasher.VirtualNodesPerServer {
+			VirtualNodeName := fmt.Sprintf("%s#VN_%d", serverStruct.Name, vn+1)
+			VirtualNodeHash := consistentHasher.GetHash(VirtualNodeName)
 			// add the hash of this virtual node to the hash ring
-			HashRing = append(HashRing, VirtualNodeHash)
+			consistentHasher.HashRing = append(consistentHasher.HashRing, VirtualNodeHash)
 			// keep track of the node hash to node name
-			NodeMap[VirtualNodeHash] = VirtualNodeName
+			consistentHasher.NodeMap[VirtualNodeHash] = data.VirtualNode{
+				ServerID: serverID,
+				VNID:     vn + 1,
+			}
 		}
 	}
-	slices.Sort(HashRing)
+	fmt.Println("Sorting the server hashes...")
+	slices.Sort(consistentHasher.HashRing)
 	fmt.Println(`
-	Select one of these
-	1. get the details of a key
-	2. see the distribution of the ring
-		`)
+Select one of these
+1. get the server name of the key
+2. add a server to the ring
+3. remove a server from the ring
+4. see the distribution of the keys.
+	`)
 	for {
 		var action int
 		_, err := fmt.Scanf("%d", &action)
@@ -79,18 +55,36 @@ func main() {
 		}
 		switch {
 		case action == 1:
-			fmt.Println("get")
-			fmt.Printf("enter the key you want to get: ")
+			fmt.Printf("Enter the key you want to get: ")
 			var ReqKey string
 			_, err := fmt.Scanf("%s", &ReqKey)
 			if err != nil {
 				log.Fatal(err)
 			}
-			FetchKey(ReqKey, &HashRing, &NodeMap)
+			serverName := consistentHasher.Get(ReqKey)
+			fmt.Printf("The given key is mapped to %s.\n", serverName)
 		case action == 2:
-			fmt.Println("dist")
+			newServerCount, success, err := consistentHasher.AddServer()
+			if !success {
+				fmt.Println("Error adding a new server: ", err.Error())
+			} else {
+				fmt.Printf("Server added successfully, total servers on the ring: %d\n", newServerCount)
+			}
+		case action == 3:
+			fmt.Printf("Enter the server id  you want to remove: ")
+			var serverID int
+			_, err := fmt.Scanf("%d", &serverID)
+			newServerCount, success, err := consistentHasher.RemoveServer(serverID)
+			if !success {
+				fmt.Println("Error removing a new server: ", err.Error())
+			} else {
+				fmt.Printf("Server deleted successfully, total servers on the ring: %d\n", newServerCount)
+			}
+		case action == 4:
+			err := consistentHasher.Visualize("./test_data/keys.txt")
+			log.Fatal(err)
 		default:
-			fmt.Println("please select from 1,2,3")
+			fmt.Println("please select from 1,2,3\n")
 		}
 	}
 

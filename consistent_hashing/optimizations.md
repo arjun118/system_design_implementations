@@ -8,3 +8,6 @@
 - current complexity: O(V * N)
 - to be approach: rebuild approach (need to study about this)
 # remove duplicate rehashing (by storing more)
+
+
+# choice of hash function decides distribution evenness
