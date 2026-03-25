@@ -11,3 +11,5 @@
 
 
 # choice of hash function decides distribution evenness
+
+# use mutexes to make this concurrency safe RWMutex and write tests

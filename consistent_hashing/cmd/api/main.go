@@ -82,9 +82,11 @@ Select one of these
 			}
 		case action == 4:
 			err := consistentHasher.Visualize("./test_data/keys.txt")
-			log.Fatal(err)
+			if err != nil {
+				log.Fatal(err)
+			}
 		default:
-			fmt.Println("please select from 1,2,3\n")
+			fmt.Println("please select from 1,2,3,4.")
 		}
 	}
 
