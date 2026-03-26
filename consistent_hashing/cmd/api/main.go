@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"slices"
 
 	"arjun118.github.io/consistent_hashing/internal/data"
 )
@@ -20,26 +19,14 @@ func main() {
 	flag.IntVar(&VirtualNodes, "virtual", 100, "number of virtual nodes per server")
 	flag.Parse()
 	consistentHasher.VirtualNodesPerServer = VirtualNodes
-	for i := range CacheServers {
-		consistentHasher.Servers[i+1] = data.Server{ID: i + 1, Name: fmt.Sprintf("Server_%d", i+1)}
-	}
 	fmt.Printf("Initilaizing the hash ring with %d servers...\n", CacheServers)
 	fmt.Printf("Adding %d virtual nodes per each server...\n", consistentHasher.VirtualNodesPerServer)
-	for serverID, serverStruct := range consistentHasher.Servers {
-		for vn := range consistentHasher.VirtualNodesPerServer {
-			VirtualNodeName := fmt.Sprintf("%s#VN_%d", serverStruct.Name, vn+1)
-			VirtualNodeHash := consistentHasher.GetHash(VirtualNodeName)
-			// add the hash of this virtual node to the hash ring
-			consistentHasher.HashRing = append(consistentHasher.HashRing, VirtualNodeHash)
-			// keep track of the node hash to node name
-			consistentHasher.NodeMap[VirtualNodeHash] = data.VirtualNode{
-				ServerID: serverID,
-				VNID:     vn + 1,
-			}
+	for range CacheServers {
+		_, _, err := consistentHasher.AddServer()
+		if err != nil {
+			log.Fatalf("Failed to initialize server: %v", err)
 		}
 	}
-	fmt.Println("Sorting the server hashes...")
-	slices.Sort(consistentHasher.HashRing)
 	fmt.Println(`
 Select one of these
 1. get the server name of the key
@@ -61,7 +48,10 @@ Select one of these
 			if err != nil {
 				log.Fatal(err)
 			}
-			serverName := consistentHasher.Get(ReqKey)
+			serverName, err := consistentHasher.Get(ReqKey)
+			if err != nil {
+				log.Fatal(err)
+			}
 			fmt.Printf("The given key is mapped to %s.\n", serverName)
 		case action == 2:
 			newServerCount, success, err := consistentHasher.AddServer()
