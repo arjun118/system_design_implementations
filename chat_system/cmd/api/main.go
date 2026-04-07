@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"arjun118.github.io/chat_system/internals/data"
 )
 
-var Hub = make(data.Hub)
+// var Hub = make(data.Hub)
 
+var Rooms = make(data.Rooms)
+var ClientLocations = make(data.ClientLocations)
 var (
 	ComersChannel   = make(chan data.Client)
 	LeaversChannel  = make(chan data.Client)
@@ -20,26 +23,6 @@ var (
 	KicksChannel    = make(chan data.Client)
 )
 
-// func handleMessages() {
-// 	for message := range MessagesChannel {
-// 		messageToBroadcast := fmt.Sprintf("%s: %s", message.MessageType, message.Message)
-// 		for connectedClient := range Hub {
-// 			client := Hub[connectedClient]
-// 			if connectedClient != message.ClientName {
-// 				// write the incoming message to the personal channel
-// 				// we read from this personal channel in a different goroutine
-// 				client.PersonalChannel <- fmt.Sprintf("%s", messageToBroadcast)
-// 			}
-// 		}
-// 	}
-// }
-
-//	func handleIndividualClient(client data.Client) {
-//		// individual handler for client
-//		for message := range client.PersonalChannel {
-//			fmt.Fprintf(client.Conn, "%s", message)
-//		}
-//	}
 func handleIndividualClient(client data.Client) {
 	for message := range client.PersonalChannel {
 		// If the OS buffer is full, and we can't write within 5 seconds, kill it.
@@ -53,17 +36,6 @@ func handleIndividualClient(client data.Client) {
 		}
 	}
 }
-
-// func clientFaninMessages(clientChannels ...chan data.Client) {
-// 	out := make(chan data.Client)
-// 	var wg sync.WaitGroup
-// 	output:= func(channel <- chan data.Client){
-// 		for n:= range channel.
-// 	}
-// 	for _, clientChannel := range clientChannels {
-
-// 	}
-// }
 
 func broadcastWorker(clientList []data.Client, message data.Message) {
 	messageToBroadcast := fmt.Sprintf("%s: %s", message.MessageType, message.Message)
@@ -95,71 +67,154 @@ func broadcastWorker(clientList []data.Client, message data.Message) {
 	}
 }
 
+func getRoomChunks(roomName string, ignoreClientName string, chunkSize int) [][]data.Client {
+	allChunks := make([][]data.Client, 0)
+	currentChunk := make([]data.Client, 0, chunkSize)
+	for _, client := range Rooms[roomName] {
+		if client.Name == ignoreClientName {
+			continue
+		}
+		currentChunk = append(currentChunk, client)
+		if len(currentChunk) == chunkSize {
+			// go broadcastWorker(currentChunk, joinMessage)
+			allChunks = append(allChunks, currentChunk)
+			currentChunk = make([]data.Client, 0, chunkSize)
+		}
+	}
+	if len(currentChunk) != 0 {
+		allChunks = append(allChunks, currentChunk)
+	}
+	return allChunks
+}
+
 // this event handler depicts - single monitor goroutine
 func EventHandler() {
 	// this handles all the messages
 	// You must either protect the Hub with a sync.RWMutex,
 	// OR (the more idiomatic Go way) handle all map reads and writes inside a single goroutine.
 	// You could merge the logic of handleMessages into EventHandler using a select statement so only one thing touches the map at a time.
+	Rooms["default"] = make(data.Hub)
 	for {
 		select {
-
-		case deadClientStruct := <-KicksChannel:
-			deadClientStruct.Conn.Close()
-			delete(Hub, deadClientStruct.Conn.RemoteAddr().String())
-
-		case message := <-MessagesChannel:
-			chunkSize := 1000
-			currentChunk := make([]data.Client, 0, chunkSize)
-			// fan out usage
-			for _, client := range Hub {
-				currentChunk = append(currentChunk, client)
-				if len(currentChunk) == chunkSize {
-					go broadcastWorker(currentChunk, message)
-					currentChunk = make([]data.Client, 0, chunkSize)
-				}
-			}
-			if len(currentChunk) != 0 {
-				go broadcastWorker(currentChunk, message)
-			}
 		case comer := <-ComersChannel:
 			// log.Printf("new comer detected:  %+v", comer)
 			clientName := comer.Conn.RemoteAddr().String()
 			// add the new comer to the hub
-			Hub[clientName] = comer
+			Rooms["default"][clientName] = comer
+			ClientLocations[clientName] = "default"
 			log.Printf("Client joined: %s", clientName)
 			joinMsg := fmt.Sprintf("%s has joined the chat\n", clientName)
-			chunkSize := 1000
-			currentChunk := make([]data.Client, 0, chunkSize)
+			// chunkSize := 1000
+			// currentChunk := make([]data.Client, 0, chunkSize)
 			joinMessage := data.Message{ClientName: clientName, MessageType: "JOIN", Message: joinMsg}
-			for _, client := range Hub {
-				currentChunk = append(currentChunk, client)
-				if len(currentChunk) == chunkSize {
-					go broadcastWorker(currentChunk, joinMessage)
-					currentChunk = make([]data.Client, 0, chunkSize)
-				}
-			}
-			if len(currentChunk) != 0 {
-				go broadcastWorker(currentChunk, joinMessage)
+			// slice of slices (where slices is a chunk of size 1000 - each will be
+			// a new goroutine broadCastWorker)
+			roomChunks := getRoomChunks("default", clientName, 1000)
+
+			for _, roomChunk := range roomChunks {
+				go broadcastWorker(roomChunk, joinMessage)
+
 			}
 		case leaver := <-LeaversChannel:
-			clientName := leaver.Conn.RemoteAddr().String()
-			delete(Hub, clientName)
+			clientName := leaver.Name
+			roomName := ClientLocations[clientName]
+			delete(Rooms[roomName], clientName)
+			delete(ClientLocations, clientName)
 
 			log.Printf("Client left: %s", clientName)
 			leaveMsg := fmt.Sprintf("%s has left the chat\n", clientName)
-			chunkSize := 1000
-			currentChunk := make([]data.Client, 0, chunkSize)
+			// chunkSize := 1000
+			// currentChunk := make([]data.Client, 0, chunkSize)
 			leaveMessage := data.Message{ClientName: clientName, MessageType: "LEAVE", Message: leaveMsg}
-			for _, client := range Hub {
-				currentChunk = append(currentChunk, client)
-				if len(currentChunk) == chunkSize {
-					go broadcastWorker(currentChunk, leaveMessage)
-					currentChunk = make([]data.Client, 0, chunkSize)
-				}
+			roomChunks := getRoomChunks(roomName, clientName, 1000)
+
+			for _, roomChunk := range roomChunks {
+				go broadcastWorker(roomChunk, leaveMessage)
+
 			}
-			if len(currentChunk) != 0 {
-				go broadcastWorker(currentChunk, leaveMessage)
+		case deadClientStruct := <-KicksChannel:
+			clientName := deadClientStruct.Name
+			roomName := ClientLocations[clientName]
+			deadClientStruct.Conn.Close()
+			delete(Rooms[roomName], clientName)
+			delete(ClientLocations, clientName)
+
+		case message := <-MessagesChannel:
+			clientName := message.ClientName
+			currentRoom := ClientLocations[clientName]
+
+			switch message.MessageType {
+			case "MSG":
+				formattedMsg := fmt.Sprintf("[%s] %s: %s\n", currentRoom, clientName, message.Message)
+				msgToSend := data.Message{ClientName: clientName, MessageType: "MSG", Message: formattedMsg}
+
+				// go broadcastWorker(getRoomChunk(currentRoom, clientName), msgToSend)
+
+				roomChunks := getRoomChunks(currentRoom, clientName, 1000)
+
+				for _, roomChunk := range roomChunks {
+					go broadcastWorker(roomChunk, msgToSend)
+
+				}
+				// Give the sender their prompt back
+				if client, ok := Rooms[currentRoom][clientName]; ok {
+					client.PersonalChannel <- fmt.Sprintf("[%s]> ", currentRoom)
+				}
+			case "CMD_JOIN":
+				newRoom := message.Message
+				client := Rooms[currentRoom][clientName]
+
+				if currentRoom != "default" {
+					roomChunks := getRoomChunks(currentRoom, clientName, 1000)
+					for _, roomChunk := range roomChunks {
+						go broadcastWorker(roomChunk, data.Message{MessageType: "LEAVE", Message: fmt.Sprintf("%s left for %s\n", clientName, newRoom)})
+
+					}
+				}
+				delete(Rooms[currentRoom], clientName)
+
+				// 3. Create new room if it doesn't exist
+				if Rooms[newRoom] == nil {
+					Rooms[newRoom] = make(data.Hub)
+				}
+				// 4. Add to new room and update location tracker
+				Rooms[newRoom][clientName] = client
+				ClientLocations[clientName] = newRoom
+
+				roomChunks := getRoomChunks(newRoom, clientName, 1000)
+				for _, roomChunk := range roomChunks {
+					go broadcastWorker(roomChunk, data.Message{MessageType: "JOIN", Message: fmt.Sprintf("%s joined\n", clientName)})
+
+				}
+
+				client.PersonalChannel <- fmt.Sprintf("Joined %s!\n[%s]> ", newRoom, newRoom)
+
+			case "CMD_LEAVE":
+				if currentRoom == "default" {
+					Rooms[currentRoom][clientName].PersonalChannel <- "You are already in the default room.\n[default]> "
+					continue
+				}
+				// (You can implement the exact same logic as CMD_JOIN here, just hardcode "default" as the target
+				// )
+				client := Rooms[currentRoom][clientName]
+				roomChunks := getRoomChunks(currentRoom, clientName, 1000)
+				for _, roomChunk := range roomChunks {
+					go broadcastWorker(roomChunk, data.Message{MessageType: "JOIN", Message: fmt.Sprintf("%s joined\n", clientName)})
+
+				}
+				delete(Rooms[currentRoom], clientName)
+				// enter default
+				newRoom := "default"
+				ClientLocations[clientName] = newRoom
+				Rooms[newRoom][clientName] = client
+				client.PersonalChannel <- fmt.Sprintf("Joined %s!\n[%s]> ", newRoom, newRoom)
+			case "CMD_GETROOMS":
+				var roomList string
+				for roomName := range Rooms {
+					roomList += fmt.Sprintf("- %s (%d users)\n", roomName, len(Rooms[roomName]))
+				}
+				Rooms[currentRoom][clientName].PersonalChannel <- fmt.Sprintf("Available Rooms:\n%s[%s]> ", roomList, currentRoom)
+
 			}
 		}
 	}
@@ -170,18 +225,31 @@ func handleConn(conn net.Conn) {
 	clientName := conn.RemoteAddr().String()
 	// log.Println("accepted connection from : ", conn.LocalAddr().String())
 	reader := bufio.NewReader(conn)
+	fmt.Fprint(conn, "[default]> ")
 	for {
 		// read until a new line, return will be
 		// the read string along with the delimiter
 		readString, err := reader.ReadString('\n')
 		if err != nil {
 			log.Println("encourntered error: ", err)
-			LeaversChannel <- data.Client{Conn: conn}
+			LeaversChannel <- data.Client{Conn: conn, Name: conn.RemoteAddr().String()}
 			return
+		}
+		text := strings.TrimSpace(readString)
+
+		if strings.HasPrefix(text, "#join ") {
+			newRoom := strings.TrimPrefix(text, "#join ")
+			MessagesChannel <- data.Message{ClientName: clientName, MessageType: "CMD_JOIN", Message: newRoom}
+		} else if text == "#leave" {
+			MessagesChannel <- data.Message{ClientName: clientName, MessageType: "CMD_LEAVE"}
+		} else if text == "#getrooms" {
+			MessagesChannel <- data.Message{ClientName: clientName, MessageType: "CMD_GETROOMS"}
+		} else if text != "" {
+			MessagesChannel <- data.Message{ClientName: clientName, MessageType: "MSG", Message: text}
 		}
 		// fmt.Printf("received: %s", readString)
 		// conn.Write([]byte("ACK: " + readString))
-		MessagesChannel <- data.Message{ClientName: clientName, MessageType: "MSG", Message: fmt.Sprintf("%s said: %s", clientName, readString)}
+		// MessagesChannel <- data.Message{ClientName: clientName, MessageType: "MSG", Message: fmt.Sprintf("%s said: %s", clientName, readString)}
 	}
 
 }
@@ -216,6 +284,7 @@ func StartServer(ctx context.Context, address string) error {
 		// log.Println("accepted the connection: ", conn.RemoteAddr().String())
 		clientStruct := data.Client{
 			Conn: conn, PersonalChannel: make(chan string, 100),
+			Name: conn.RemoteAddr().String(),
 		}
 		go handleIndividualClient(clientStruct)
 		ComersChannel <- clientStruct
