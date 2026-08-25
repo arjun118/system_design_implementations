@@ -9,10 +9,10 @@
 | 1     | Baseline trie + DFS heap                        | ✅ done |
 | 2     | Per-node top-K cache                            | ✅ done |
 | 3     | Cache population + benchmark gate               | ✅ done |
-| 4     | Prefix hash map + benchmark                     | ⬜      |
+| 4     | Multi-word phrase dataset (Google Books ngrams) | ⬜      |
 | 5     | MongoDB persistence                             | ⬜      |
 | 6     | HTTP server + web UI                            | ⬜      |
-| 7     | Multi-phrase dataset                            | ⬜      |
+| 7     | Prefix hash map (flat cache, deferred)          | ⬜      |
 | 8     | Query logging + adaptive learning (Mongo/Redis) | ⬜      |
 | 9     | Toy sharding                                    | ⬜      |
 
@@ -103,7 +103,7 @@ func (t *Trie) TraverseAndBuild(node *Node, prefix string) []Reco {
 
 Tree-wide: Σd over all nodes = number of edges ≈ number of nodes, so `BuildCache` is a one-time O(nodes · (d + K)·log d).
 
-**Memory warning:** totalNodes × K × sizeof(Reco). For 1M words, avg length 10 → up to ~10M nodes × 10 × 16B ≈ 1.6 GB worst case. If that bites: cap cached depth, or jump to Phase 4's flat map.
+**Memory warning:** totalNodes × K × sizeof(Reco). For 1M words, avg length 10 → up to ~10M nodes × 10 × 16B ≈ 1.6 GB worst case. If that bites: cap cached depth, or jump to Phase 7's flat map.
 
 **Benchmark gate — passed.** Actual results (i7-10510U, 8 threads, 2026-08-25):
 
@@ -134,41 +134,108 @@ BenchmarkSuggest/exact_word-8       5405605     238.3 ns/op     160 B/op      1 
 
 ---
 
-## Phase 4 — Prefix hash map (flat cache)
+## Phase 4 — Multi-word phrase dataset (Google Books ngrams)
 
-**Why now, when query latency is already at the floor?** Phase 3 measured ~145 ns/op (1-char) and ~117 ns/op (rare) — within a couple of map lookups of the hardware floor. A flat map would save maybe 30–50 ns (~20–30%), which is invisible to a user (both are far under the 5 ms p50 budget). **Phase 4 is not a latency play — it's an operational play:**
+**Why this now, ahead of the flat map:** the flat map saves ~30 ns on a ~145 ns op — invisible to a user. Phrases change what the user _sees_: Google-style multiword completion instead of single words. This is the product-level change, so it gets pulled forward.
 
-- **Build parallelism** — per-letter buckets across goroutines
-- **1:1 Mongo serialization** — one prefix = one document (unlocks Phase 5)
-- **Simpler Phase 8 rebuild** — rebuild one flat map and `atomic.Pointer` swap it; no tree walks
-- **Measurable memory tradeoff** — flat storage of every distinct prefix, no sharing
+**Core model: space is just a rune.** No new data structure. `Insert("starbucks near me", freq)` treats `' '` as a first-class character in the trie path — no different from `'r'`:
 
-```go
-type PrefixIndex map[string][]Reco // prefix -> top-K, sorted desc
+```
+root → s → t → a → r → b → u → c → k → s → [space] → n → e → a → r → [space] → m → e
 ```
 
-**Build:** for each word, for each prefix `p` of `1..len(word)`, merge `(word, freq)` into `index[p]` keeping top-K. Parallelizable by first letter: each goroutine owns a letter bucket, then union.
+This is why phrase autocomplete works at all: **n-grams share prefixes at word boundaries**. The 1-gram `starbucks` and the 3-gram `starbucks near me` share their first 9 nodes. Zipf-ish data means a few hot word prefixes are shared by thousands of phrases — which keeps node count (and cache memory) bounded.
 
-**Tradeoff vs Phase 2 trie:**
+Word-boundary semantics come out for free:
 
-|                                | Trie + node cache          | Prefix hash map                             |
-| ------------------------------ | -------------------------- | ------------------------------------------- |
-| Query                          | O(\|prefix\|) walk + slice | O(1) hash lookup                            |
-| Memory                         | shared prefixes → compact  | every distinct prefix stored flat → heavier |
-| Serialize to Mongo             | custom tree→docs           | 1 prefix = 1 doc                            |
-| Prefix-walk (fuzzy, next-char) | natural                    | awkward                                     |
-| Rebuild for learning (Ph 8)    | tree walk + merge          | build one flat map, one swap                |
+- Type `starbuc` (mid-word) → full phrases starting with `starbuc…`
+- Type `starbucks ` (trailing space) → land on the space node → only _next-word_ continuations; the completed 1-gram `starbucks` lives at the pre-space node and can't pollute results. That's exactly Google's behavior.
 
-**Gotcha:** worst case = distinct prefixes × K. ~10M prefixes × 10 × 16B ≈ several GB for 1M words. Mitigation if needed: cache only prefixes ≤ some depth, fall back to the Phase 3 trie.
+Why not a token-level (word-node) trie: mid-word completion (`star` →) would need a separate char trie per token. Space-as-rune gets it for free. Table kept in git history from design discussion.
 
-**Decision point:** the trie stays as the reference implementation for tests; the flat map becomes the serving structure.
+### Dataset — Google Books ngrams
+
+- Source: Google Cloud Storage — `storage.googleapis.com/books/ngrams/books/20200217/` (verify the file list; pattern like `eng-2grams/eng-2grams-1-2_of_16.gz`)
+- Scope: **2-grams and 3-grams**, one or two letter-range files
+- Caveat: literary language, not search-query flavor — you'll get "in the beginning", not "how to fix iphone". Accepted tradeoff for license cleanliness.
+- Raw size: one letter file ~100–500 MB gzipped; after filtering, tens of MB.
+
+### Preprocessing pipeline (input → `out_phrases.txt`, `phrase TAB freq` format)
+
+1. For each ngram, **sum `match_count` across years**
+2. Filter ngrams with total freq < threshold (e.g. 5,000)
+3. Drop tokens containing `_` (`New_York`) or POS tags (`the_ADJ`)
+4. Lowercase
+5. Emit `ngram TAB total_count`
+
+Keep `out.txt` (the current 1-gram dataset) for side-by-side benchmarks.
+
+### Implementation steps (one by one)
+
+**1. Fix `BuildTrie`'s parser.** `strings.Fields` splits on _all_ whitespace, which destroys phrases: `"starbucks near me\t500"` → `fields[0]="starbucks"`, and `Atoi(fields[1])` fails on `"near"`. Split on the tab explicitly:
+
+```go
+line := strings.TrimSpace(scanner.Text())
+if line == "" { continue }
+tab := strings.LastIndexByte(line, '\t')
+if tab < 0 { continue }
+// lowercase + collapse internal whitespace (safe: we already split on the tab)
+phrase := strings.Join(strings.Fields(strings.ToLower(line[:tab])), " ")
+freqInt, err := strconv.Atoi(strings.TrimSpace(line[tab+1:]))
+if err != nil { fmt.Printf("bad freq: %q\n", line[tab+1:]); continue }
+trie.Insert(phrase, freqInt)
+```
+
+`Insert`, `DFS`, `Search`, `TraverseAndBuild`, `mergeTopK`, `Suggest` — **all untouched**. Phrase support is a parser change and nothing else.
+
+**2. Preprocessing tool** — `cmd/preprocess_ngrams` implementing the pipeline above, writing `out_phrases.txt`.
+
+**3. Ranking semantics — raw freq first.** With mixed 1–3-grams, raw counts bias toward short phrases: at node `starbucks`, the 1-gram `starbucks` (~1M) will beat the 3-gram `starbucks near me` (~10k). Keep raw for now — it keeps `cached ≡ DFS` provable. The fix is the Phase 2 `Trie.SumFreq bool` toggle (subtree-summed), flipped on as the first ranking experiment and benchmarked on _suggestion quality_, not latency.
+
+**4. Tests — `TestPhraseSuggest`.** The cases that catch parser/trie mistakes:
+
+```go
+func TestPhraseSuggest(t *testing.T) {
+    trie := NewTrie()
+    trie.Insert("starbucks", 1000)        // 1-gram coexists with its phrases
+    trie.Insert("starbucks near me", 900)
+    trie.Insert("starbucks near you", 800)
+    trie.Insert("starbucks delivery", 700)
+    trie.BuildCache()
+
+    require.Equal(t, []string{"starbucks near me", "starbucks near you"},
+        trie.Suggest("starbucks ne", true))
+
+    // trailing space narrows to next-word completions; the 1-gram is excluded
+    require.Equal(t, []string{"starbucks near me", "starbucks near you", "starbucks delivery"},
+        trie.Suggest("starbucks ", true))
+
+    // cached ≡ DFS for non-exact prefixes
+    require.Equal(t, trie.Suggest("starbucks n", true), trie.Suggest("starbucks n", false))
+}
+```
+
+**5. Benchmarks** — extend the `BenchmarkSuggest` table with phrase-relevant prefixes, especially the trailing-space case that trips naive implementations:
+
+```go
+{"phrase_mid_word", "starbuc"},
+{"phrase_word_done", "starbucks "},   // trailing space → next-word completions
+{"phrase_2word", "starbucks ne"},
+{"phrase_common", "how to"},
+{"phrase_common_done", "how to "},    // 2+3-grams only; "how" excluded by the space
+{"phrase_rare", "zzz q"},
+```
+
+Run `BenchmarkBuildCacheK` against `out_phrases.txt` — the numbers that matter there are build time and allocs/op (the memory story), not query ns.
+
+**6. Memory watch.** 500k phrases with shared word-prefixes ≈ 5–15M nodes ≈ 1–2 GB with K=10 caches. Zipf sharing is what keeps this bounded. Cap phrase length at ~5 words as a control.
 
 **Exit criteria:**
 
-- Build time measured with `BenchmarkBuildCacheK` (expect roughly linear in K; record the K=10/50/100 table)
-- Equivalence test `Trie.Suggest ≡ PrefixIndex.Suggest` (excluding exact-word rows)
-- Benchmark re-run: flat across prefixes, expected to match Phase 3 within noise — confirm the ~20–30% delta is all Phase 4 buys on latency
-- Serialization round-trip sketch (map → JSONL → map) as Phase 5 prep
+- `q=starbucks ne`-style prefixes return ranked phrase completions
+- `cached ≡ DFS` for non-exact prefixes on phrase data (same tests, phrase inputs)
+- Benchmark table updated with the phrase rows
+- Build time + memory logged for the phrase dataset
 
 ---
 
@@ -182,14 +249,14 @@ collection words:    { _id: "<word>",   f: 12345 }
 collection queries:  { q: "<query>", ts: ISODate(...) }   // Phase 8
 ```
 
-`_id` = prefix gives a natural unique index and point lookups. The Phase 4 flat map maps 1:1 onto `prefixes` — the reason Phase 5 is trivial now.
+`_id` = prefix gives a natural unique index and point lookups. No flat map needed: **walk the trie and emit one document per node — `(prefix, node.Top)` — which is exactly the `prefixes` collection.** The Phase 7 flat map later turns this walk into a direct 1:1 dump.
 
 **Serving vs durability — keep them separate.**
 
 - Hot path: in-memory `PrefixIndex`, loaded once at boot
 - Mongo: source of truth for persistence and (later) learning
 - A Mongo round-trip is ~0.1–1 ms. Never read-through on the hot path.
-- Initial seed can use `mongoimport` from a JSONL dump of `PrefixIndex` — no driver code needed for the first load
+- Initial seed can use `mongoimport` from a JSONL dump of the trie walk — no driver code needed for the first load
 
 **Deliverables:** `docker-compose.yml` (`mongo:7`), `cmd/seed` (build + dump), `cmd/server` (load at boot), Mongo-backed tests behind a `//go:build mongo` tag.
 
@@ -214,7 +281,7 @@ Client: `static/index.html` + `static/app.js`, vanilla JS, 150 ms debounce, ↑/
 1. **Debounce kills the problem client-side.** Typing `starbucks` is ~9 keystrokes over ~2.5 s; a 150 ms debounce collapses that to 1–2 requests per session. An `AbortController` cancels the in-flight request on new input, and a small client-side LRU of recent prefixes makes backspacing instant. The "every keystroke" load never reaches the network.
 2. **Payload is tiny — transport framing is noise.** 10 suggestions ≈ 400–600 B of JSON. HTTP/2 keep-alive + HPACK headers add ~30–50 B; a WebSocket frame adds 2–14 B. Both fit in a single packet (MTU 1500). The <10% framing difference is invisible in p99.
 3. **Scale favors stateless HTTP.** 1M concurrent WebSocket connections ≈ 10–50 GB of server memory (buffers + epoll state) just to keep sockets idle, plus a keepalive tax (~33K ping/pong frames/s at 1M connections with a 30 s interval). HTTP connections churn — concurrent connections track _actively typing users_, not the total user base. CDNs/LBs/proxies are HTTP-native; WS needs upgrade handling, proxy timeouts, and per-connection state. GETs are cacheable (edge/browser), idempotent, and retryable, and the reverse proxy gives the Phase 8 query log for free. Per-user rate limiting at the LB works on HTTP; with WS it must be implemented per-connection in the app.
-4. **It fits the Phase 4–9 design.** The in-memory `PrefixIndex` + `atomic.Pointer` swap makes every request stateless — exactly what HTTP load balancing wants. WS would fight the design, not complement it.
+4. **It fits the Phase 7–9 design.** The in-memory `PrefixIndex` + `atomic.Pointer` swap makes every request stateless — exactly what HTTP load balancing wants. WS would fight the design, not complement it.
 
 The three cases where WS/SSE actually earns its keep: server-push (live trending, "this prefix's top-K changed" invalidation), an existing persistent channel (collaborative editing), and streamed partial results with a <100 ms budget and no debounce tolerance. For the push case, prefer **SSE** (`text/event-stream`) first: it rides plain HTTP, auto-reconnects, and works through proxies — ~80% of WS's value at 20% of the complexity.
 
@@ -231,39 +298,47 @@ The three cases where WS/SSE actually earns its keep: server-push (live trending
 wrk -t4 -c100 -d30s 'http://localhost:8080/api/suggest?q=a&k=10'
 ```
 
-Record RPS + p50/p95/p99. Run the same against the Phase 1 DFS algorithm and against Phases 3/4. Expected story: p99 flat across prefixes for the optimized version; p99 explodes for `q=a` with DFS. Paste the wrk table into this README.
+Record RPS + p50/p95/p99. Run the same against the Phase 1 DFS algorithm and against the Phase 3 cached trie (phrase-enabled). Expected story: p99 flat across prefixes for the optimized version; p99 explodes for `q=a` with DFS. Paste the wrk table into this README.
 
 **Budget:** p50 < 5 ms, p99 < 20 ms on the dev machine.
 
 ---
 
-## Phase 7 — Multi-phrase dataset
+## Phase 7 — Prefix hash map (flat cache, deferred)
 
-**Encoding.** Phrases are just strings with spaces; two options:
+**Why build it now (right before the learning phase), not earlier:** query latency is at the floor (~145 ns) — a flat map saves ~30 ns, invisible to a user. It earns its keep in Phase 8: the learning rebuild becomes _build one flat map, swap one pointer_ instead of walking the trie, and Mongo write-behind becomes flat upserts. Operational wins, not latency:
 
-1. Space as a regular rune — insert "starbucks near me" verbatim. Zero code churn; upgrading `q=starbucks ne` → suggests "starbucks near me" works out of the box.
-2. Token-level trie (complete only the last token). Only worth it if phrase UX demands it later.
+- **Simpler Phase 8 rebuild** — rebuild one map off the hot path, one `atomic.Pointer` swap
+- **Simpler Mongo write-behind** — flat `prefix → top` documents, no tree-shaped updates
+- **Build parallelism** — per-letter buckets across goroutines
+- **Measurable memory tradeoff** — flat storage of every distinct prefix, no sharing
 
-Start with (1).
-
-**Reference dataset (Phases 1–6 tests):**
-
-```
-trichinella	39707
-chlorella	227266
-xtremetones	55733
-underseat	25016
-riegelsville	20690
-greedo	30093
-cellulite	815135
-yertle	16309
-montaje	34493
-birchdale	16567
+```go
+type PrefixIndex map[string][]Reco // prefix -> top-K, sorted desc
 ```
 
-For phrases, generate a synthetic `out_phrases.txt` (weighted n-gram-ish generator, Zipf-ish frequencies). Keep **both** files so the Phase 6 suite runs on single words and phrases.
+**Build:** for each word/phrase, for each prefix `p` of `1..len(phrase)`, merge `(phrase, freq)` into `index[p]` keeping top-K. Parallelizable by first letter: each goroutine owns a letter bucket, then union.
 
-**Exit:** `q=starbucks ne` returns ranked phrase completions; benchmark table updated for the phrase dataset; watch memory — phrases inflate distinct-prefix counts fast.
+**Tradeoff vs Phase 2 trie:**
+
+|                                | Trie + node cache          | Prefix hash map                             |
+| ------------------------------ | -------------------------- | ------------------------------------------- |
+| Query                          | O(\|prefix\|) walk + slice | O(1) hash lookup                            |
+| Memory                         | shared prefixes → compact  | every distinct prefix stored flat → heavier |
+| Mongo write-behind             | tree-shaped updates        | 1 prefix = 1 doc                            |
+| Prefix-walk (fuzzy, next-char) | natural                    | awkward                                     |
+| Rebuild for learning (Ph 8)    | tree walk + merge          | build one flat map, one swap                |
+
+**Gotcha:** worst case = distinct prefixes × K. For 500k phrases, avg length 20 → up to ~10M prefixes × 10 × 16B ≈ 1.6 GB worst case. Mitigation if needed: cache only prefixes ≤ some depth, fall back to the Phase 3 trie.
+
+**Decision point:** the trie stays as the reference implementation for tests; the flat map becomes the serving structure.
+
+**Exit criteria:**
+
+- Build time measured with `BenchmarkBuildCacheK` on phrase data (expect roughly linear in K; record the K=10/50/100 table)
+- Equivalence test `Trie.Suggest ≡ PrefixIndex.Suggest` (excluding exact-word rows)
+- Benchmark re-run on phrase data: flat across prefixes; confirm the ~20–30% delta is all the flat map buys
+- Confirm the Phase 8 rebuild path: one map build + `atomic.Pointer` swap, no tree walks
 
 ---
 
@@ -274,7 +349,7 @@ For phrases, generate a synthetic `out_phrases.txt` (weighted n-gram-ish generat
 1. **Log** — HTTP handler appends `{q, ts}` to Mongo `queries` on every suggestion request.
 2. **Aggregate** — worker goroutine every ~60 s: buffer recent queries, `zincrby` into a Redis sorted set `recent` (windowed), count into Mongo.
 3. **Learn** — `f_new = α·f_old + (1−α)·window_count` (EMA) or additive boost + re-normalize.
-4. **Reapply** — rebuild the `PrefixIndex` off the hot path, then atomically swap: serve behind `atomic.Pointer[PrefixIndex]`. Readers never see a half-updated index. (The Phase 4 flat map makes this a single map build + swap — no tree walks.)
+4. **Reapply** — rebuild the `PrefixIndex` off the hot path, then atomically swap: serve behind `atomic.Pointer[PrefixIndex]`. Readers never see a half-updated index. (The Phase 7 flat map makes this a single map build + swap — no tree walks.)
 5. **Trending** — `zrevrange recent 0 9` from Redis → `/api/trending` endpoint, pushed to clients via SSE (see the Phase 6 transport decision).
 
 **Division of labor — the classic mistake, avoided:**
@@ -338,6 +413,9 @@ go tool pprof -http=:8080 cpu.out
 # build benchmarks (Phase 3/4 gates)
 go test -bench=BenchmarkBuild -benchmem -run=^$ -count=3
 go test -bench=BenchmarkBuildCacheK -benchmem -run=^$ -count=3
+
+# phrase dataset preprocessing (Phase 4)
+go run ./cmd/preprocess_ngrams --in eng-2grams-1-2_of_16.gz --min-freq 5000 --out out_phrases.txt
 
 # load tests (Phase 6)
 wrk -t4 -c100 -d30s 'http://localhost:8080/api/suggest?q=a&k=10'

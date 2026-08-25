@@ -1,4 +1,4 @@
-package main
+package trie
 
 import (
 	"bufio"
@@ -11,33 +11,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// func TestScanLogic(t *testing.T) {
-// 	file, err := os.Open("./test.txt")
-// 	require.NoError(t, err)
-// 	defer file.Close()
-// 	scanner := bufio.NewScanner(file)
-// 	for scanner.Scan() {
-// 		line := strings.TrimSpace(scanner.Text())
-// 		if line == "" {
-// 			continue
-// 		}
-// 		fields := strings.Fields(line)
-// 		require.GreaterOrEqual(t, len(fields), 2, "line must contain at least a key and a frequency")
-// 		word := fields[0]
-// 		freqInt, err := strconv.Atoi(fields[1])
-// 		require.NoError(t, err)
-// 		t.Logf("word: %s, freq: %d", word, freqInt)
-// 	}
-// 	require.NoError(t, scanner.Err())
-// 	if err := scanner.Err(); err != nil {
-// 		// panic(fmt.Sprintf("failed build trie..%s", err.Error()))
-// 		require.NoError(t, err)
-// 	}
-// }
+// var sink []string
 
+const TestFileName string = "/home/cicada/system_design_implementations/search_autocomplete/test.txt"
+const OrgFileName string = "/home/cicada/system_design_implementations/search_autocomplete/aol_queries.txt"
+
+func TestParseLine(t *testing.T) {
+	lines := [][]string{
+		{"bluehost.com\t3", "bluehost.com", "3"},
+		{"razor bumps\t12", "razor bumps", "12"},
+		{"ing retirement\t11", "ing retirement", "11"},
+		{"how to get rid of bees\t5", "how to get rid of bees", "5"},
+		{"sgs\t4", "sgs", "4"},
+		{"dell preferred account\t16", "dell preferred account", "16"},
+		{"anita bryant\t10", "anita bryant", "10"},
+		{"putas.com\t8", "putas.com", "8"},
+		{"fix a toilet\t4", "fix a toilet", "4"},
+		{"purina.com\t10", "purina.com", "10"},
+	}
+	for _, line := range lines {
+		phrase, freq, _ := ParseLine(line[0])
+		require.Equal(t, line[1], phrase)
+		require.Equal(t, line[2], fmt.Sprintf("%d", freq))
+	}
+}
 func TestWordSearchAndCount(t *testing.T) {
-	trie := BuildTrie("./test.txt")
-	file, err := os.Open("./test.txt")
+	trie := BuildTrie(TestFileName)
+	file, err := os.Open(TestFileName)
 	require.NoError(t, err)
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
@@ -61,8 +61,8 @@ func TestWordSearchAndCount(t *testing.T) {
 }
 
 func TestPrefixSearch(t *testing.T) {
-	trie := BuildTrie("./test.txt")
-	file, err := os.Open("./test.txt")
+	trie := BuildTrie(TestFileName)
+	file, err := os.Open(TestFileName)
 	require.NoError(t, err)
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
@@ -100,29 +100,19 @@ func TestMergeTopK(t *testing.T) {
 	want := []int64{9, 8, 7, 5, 4, 2}
 	require.Equal(t, got, want)
 }
+
+// only build - no cache
 func BenchmarkBuild(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
-		trie := BuildTrie("./out.txt")
-		trie.BuildCache()
-	}
-}
-
-// Cache population only — isolates the merge cost from file I/O.
-// The trie is built once in setup (outside the timer); BuildCache is
-// idempotent, so re-running it per iteration measures just the merge.
-func BenchmarkBuildCache(b *testing.B) {
-	trie := BuildTrie("./out.txt") // setup: not timed
-	b.ResetTimer()
-	b.ReportAllocs()
-	for range b.N {
-		trie.BuildCache()
+		_ = BuildTrie(OrgFileName)
+		// trie.BuildCache()
 	}
 }
 
 // k scaling bench
 func BenchmarkBuildCacheK(b *testing.B) {
-	trie := BuildTrie("./out.txt")
+	trie := BuildTrie(OrgFileName)
 	for _, k := range []int{10, 50, 100} {
 		b.Run(fmt.Sprintf("K-%d", k), func(b *testing.B) {
 			trie.K = k
@@ -134,8 +124,9 @@ func BenchmarkBuildCacheK(b *testing.B) {
 	}
 }
 
-func BenchmarkSuggest(b *testing.B) {
-	trie := BuildTrie("./out.txt")
+func BenchmarkTrieSuggest(b *testing.B) {
+	trie := BuildTrie(OrgFileName)
+	trie.K = 10
 	trie.BuildCache()
 	table := []struct {
 		name   string
@@ -151,8 +142,35 @@ func BenchmarkSuggest(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				_ = trie.Suggest(tc.prefix, true)
+				_ = trie.Suggest(tc.prefix)
 			}
+			// _ = sink
+		})
+	}
+}
+
+func BenchmarkPrefixSuggest(b *testing.B) {
+	trie := BuildTrie(OrgFileName)
+	trie.K = 10
+	trie.BuildCache()
+	pi := BuildPrefixIndex(trie)
+	table := []struct {
+		name   string
+		prefix string
+	}{
+		{"prefix_1char", "s"},
+		{"prefix_2char", "ca"},
+		{"prefix_rare", "zzz"},
+		{"exact_word", "google"},
+	}
+	for _, tc := range table {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				_ = pi.Suggest(tc.prefix)
+			}
+			// _ = sink
 		})
 	}
 }
