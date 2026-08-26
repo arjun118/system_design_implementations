@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autocomplete</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0d0d0d;
+    --border: #262626;
+    --text: #f2f2f2;
+    --muted: #8a8a8a;
+    --accent: #6ea8ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 15vh 16px 40px;
+  }
+  .container {
+    width: 100%;
+    max-width: 560px;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    margin-bottom: 16px;
+    text-align: center;
+  }
+  .search-wrap {
+    position: relative;
+  }
+  #search {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: var(--text);
+    font-size: 18px;
+    padding: 14px 18px;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  #search:focus {
+    border-color: var(--accent);
+  }
+  #search::placeholder {
+    color: var(--muted);
+  }
+  #results {
+    list-style: none;
+    margin-top: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  #results li {
+    padding: 12px 18px;
+    font-size: 16px;
+    cursor: pointer;
+    border-bottom: 1px solid #1a1a1a;
+  }
+  #results li:last-child {
+    border-bottom: none;
+  }
+  #results li:hover,
+  #results li.active {
+    background: #1a1a1a;
+  }
+  .match {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .empty {
+    color: var(--muted);
+    font-size: 14px;
+    padding: 12px 18px;
+  }
+  .hint {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 14px;
+    text-align: center;
+  }
+  .timing {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 8px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    min-height: 1em;
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1>SEARCH AUTOCOMPLETE</h1>
+    <div class="search-wrap">
+      <input id="search" type="text" placeholder="Type to search…"
+             autocomplete="off" spellcheck="false" aria-label="Search">
+      <ul id="results" hidden></ul>
+    </div>
+    <p id="timing" class="timing"></p>
+    <p class="hint">↑/↓ navigate · Enter select · Esc clear</p>
+  </div>
+
+<script>
+(() => {
+  const input = document.getElementById('search');
+  const list = document.getElementById('results');
+  const timing = document.getElementById('timing');
+
+  let controller = null;   // AbortController for the in-flight request
+  let reqId = 0;           // monotonically increasing; drop stale responses
+  let debounceTimer = null;
+  let activeIndex = -1;    // keyboard selection
+  let items = [];          // current rendered suggestions
+
+  async function fetchSuggestions(q) {
+    if (controller) controller.abort();
+    const id = ++reqId;
+    controller = new AbortController();
+    try {
+      const res = await fetch(`/api/suggest?q=${encodeURIComponent(q)}`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (id !== reqId) return; // a newer keystroke superseded this response
+      render(data.suggestions || []);
+      showTiming(data.duration_ns);
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      if (id !== reqId) return;
+      render([]);
+      showTiming(null);
+    }
+  }
+
+  function render(newItems) {
+    items = newItems;
+    activeIndex = -1;
+    list.innerHTML = '';
+    if (items.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'No suggestions';
+      list.appendChild(li);
+      list.hidden = false;
+      return;
+    }
+    const q = input.value.trim();
+    items.forEach((word, i) => {
+      const li = document.createElement('li');
+      // highlight the matched prefix; textContent only (no HTML injection)
+      const lower = word.toLowerCase();
+      const m = lower.startsWith(q.toLowerCase()) ? q.length : 0;
+      if (m > 0) {
+        const b = document.createElement('b');
+        b.className = 'match';
+        b.textContent = word.slice(0, m);
+        li.appendChild(b);
+        li.appendChild(document.createTextNode(word.slice(m)));
+      } else {
+        li.textContent = word;
+      }
+      li.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // keep focus in the input
+        select(i);
+      });
+      list.appendChild(li);
+    });
+    list.hidden = false;
+  }
+
+  function select(i) {
+    if (i < 0 || i >= items.length) return;
+    input.value = items[i];
+    render([]);
+    input.focus();
+  }
+
+  function clearResults() {
+    items = [];
+    activeIndex = -1;
+    list.innerHTML = '';
+    list.hidden = true;
+    timing.textContent = '';
+  }
+
+  function showTiming(ns) {
+    if (ns == null || ns < 0) {
+      timing.textContent = '';
+      return;
+    }
+    timing.textContent = `suggested in ${fmtDuration(ns)}`;
+  }
+
+  function fmtDuration(ns) {
+    if (ns >= 1e6) return (ns / 1e6).toFixed(2) + ' ms';
+    if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' µs';
+    return ns.toFixed(0) + ' ns';
+  }
+
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = input.value.trim();
+    if (!q) {
+      clearResults();
+      return;
+    }
+    debounceTimer = setTimeout(() => fetchSuggestions(q), 150);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (items.length === 0) return;
+    const lis = list.querySelectorAll('li:not(.empty)');
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        activeIndex = Math.min(activeIndex + 1, lis.length - 1);
+        highlightActive(lis);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        activeIndex = Math.max(activeIndex - 1, 0);
+        highlightActive(lis);
+        break;
+      case 'Enter':
+        e.preventDefault();
+        select(activeIndex >= 0 ? activeIndex : 0);
+        break;
+      case 'Escape':
+        clearResults();
+        input.value = '';
+        break;
+    }
+  });
+
+  function highlightActive(lis) {
+    lis.forEach((li, i) => li.classList.toggle('active', i === activeIndex));
+  }
+})();
+</script>
+</body>
+</html>
