@@ -107,13 +107,14 @@ func main() {
 	var (
 		file = flag.String("file", "/home/cicada/system_design_implementations/search_autocomplete/aol_queries.txt",
 			"data file (phrase TAB freq)")
-		impl = flag.String("impl", "trie", "implementation: trie | prefix-hash")
-		k    = flag.Int("k", 10, "cache size (top-k suggestions)")
-		addr = flag.String("addr", ":8080", "listen address")
+		impl       = flag.String("impl", "trie", "implementation: trie | prefix-hash")
+		k          = flag.Int("k", 5, "cache size (top-k suggestions)")
+		addr       = flag.String("addr", ":8080", "listen address")
+		cacheDepth = flag.Int("cd", 6, "cache depth (cache only shallow nodes - not deep nodes")
 	)
 	flag.Parse()
 
-	s, err := trie.Load(*file, *impl, *k)
+	s, err := trie.Load(*file, *impl, *k, *cacheDepth)
 	if err != nil {
 		log.Fatalf("load %s (%s): %v", *file, *impl, err)
 	}

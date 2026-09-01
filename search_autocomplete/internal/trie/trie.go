@@ -19,13 +19,15 @@ type Node struct {
 
 func NewNode() *Node {
 	return &Node{
-		Children: make(map[rune]*Node),
+		// lazy children
+		// Children: make(map[rune]*Node),
 	}
 }
 
 type Trie struct {
-	Root *Node
-	K    int
+	Root       *Node
+	K          int
+	CacheDepth int
 }
 
 func NewTrie() *Trie {
@@ -38,6 +40,10 @@ func (t *Trie) Insert(s string, freq int64) {
 	// insert and return the freq of the word
 	node := t.Root
 	for _, x := range s {
+		if node.Children == nil {
+			// if the node doesnot have children -lets initialize here
+			node.Children = make(map[rune]*Node)
+		}
 		nextnode, ok := node.Children[x]
 		if !ok {
 			// add new
@@ -103,4 +109,22 @@ func BuildTrie(ipfile string) *Trie {
 		panic(fmt.Sprintf("failed build trie..%s", err.Error()))
 	}
 	return trie
+}
+
+func (t *Trie) walkForIndex(node *Node, prefix string, pi PrefixIndex) []Reco {
+	cands := make([][]Reco, 0, len(node.Children)+1)
+	if node.IsWord {
+		cands = append(cands, []Reco{{Word: prefix, Freq: node.Freq}})
+	}
+	for key, child := range node.Children {
+		cands = append(cands, t.walkForIndex(child, prefix+string(key), pi))
+	}
+	var top []Reco
+	if len(cands) == 1 {
+		top = cands[0] // already ≤ K, sorted
+	} else if len(cands) > 1 {
+		top = mergeTopK(cands, t.K)
+	}
+	pi[prefix] = top
+	return top
 }

@@ -9,14 +9,15 @@ type Suggester interface {
 	Suggest(prefix string) []string
 }
 
-func Load(path string, impl string, k int) (Suggester, error) {
+func Load(path string, impl string, k int, cd int) (Suggester, error) {
 	if !slices.Contains([]string{"trie", "prefix-hash"}, impl) {
 		return nil, fmt.Errorf("invalid implementation")
 
 	}
 	trie := BuildTrie(path)
 	trie.K = k
-	trie.BuildCache()
+	trie.CacheDepth = cd
+	trie.BuildCacheParallel()
 	if impl == "trie" {
 		return trie, nil
 	} else {

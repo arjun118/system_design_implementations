@@ -1,18 +1,38 @@
 package trie
 
-import "container/heap"
+import (
+	"container/heap"
+	"unicode/utf8"
+)
 
-func (t *Trie) TraverseAndBuild(node *Node, prefix string) []Reco {
+func (t *Trie) TraverseAndBuild(node *Node, path []byte) []Reco {
 	cands := make([][]Reco, 0, (len(node.Children) + 1))
 	// includes exact word suggestions
 	if node.IsWord {
-		cands = append(cands, []Reco{{Word: prefix, Freq: node.Freq}})
+		cands = append(cands, []Reco{{Word: string(path), Freq: node.Freq}})
 	}
 	for key, child := range node.Children {
-		cands = append(cands, t.TraverseAndBuild(child, prefix+string(key)))
+		n := len(path)
+		path = utf8.AppendRune(path, key) // no alloc if capacity allows
+		childTop := t.TraverseAndBuild(child, path)
+		path = path[:n] // truncate back for siblings
+		if len(childTop) > 0 {
+			cands = append(cands, childTop)
+		}
 	}
-	node.Top = mergeTopK(cands, t.K)
-	return node.Top
+	var top []Reco
+	switch len(cands) {
+	case 0:
+		// leaf, no own word
+	case 1:
+		top = cands[0] // already ≤ K, sorted — no merge
+	default:
+		top = mergeTopK(cands, t.K)
+	}
+	if utf8.RuneCount(path) <= t.CacheDepth {
+		node.Top = top
+	}
+	return top
 }
 
 func mergeTopK(lists [][]Reco, k int) []Reco {
@@ -34,31 +54,32 @@ func mergeTopK(lists [][]Reco, k int) []Reco {
 	return out
 }
 
-// func topK(cands []Reco, k int) []Reco {
-// 	h := &RecHeap{}
-// 	heap.Init(h)
-// 	for _, r := range cands {
-// 		if h.Len() < k {
-// 			heap.Push(h, r)
-// 		} else if h.Top().Freq < r.Freq {
-// 			heap.Pop(h)
-// 			heap.Push(h, r)
-// 		}
-// 	}
-// 	out := make([]Reco, 0, h.Len())
-// 	for h.Len() > 0 {
-// 		out = append(out, heap.Pop(h).(Reco))
-// 	}
-// 	slices.Reverse(out)
-// 	return out
-// }
-
 func (t *Trie) BuildCache() error {
 	// default - safety
 	if t.K == 0 {
 		t.K = 10
 	}
 	node := t.Root
-	t.TraverseAndBuild(node, "")
+	// passing depth
+	t.TraverseAndBuild(node, make([]byte, 0, 32))
+	return nil
+}
+
+func (t *Trie) BuildCacheParallel() error {
+	type res struct {
+		top []Reco
+	}
+	ch := make(chan res, len(t.Root.Children))
+	for key, child := range t.Root.Children {
+		go func(c *Node, key rune) {
+			ch <- res{top: t.TraverseAndBuild(c, []byte{byte(key)})}
+		}(child, key)
+	}
+	cands := make([][]Reco, 0, len(t.Root.Children))
+	for range t.Root.Children {
+		r := <-ch
+		cands = append(cands, r.top)
+	}
+	t.Root.Top = mergeTopK(cands, t.K)
 	return nil
 }

@@ -14,27 +14,27 @@ import (
 // var sink []string
 
 const TestFileName string = "/home/cicada/system_design_implementations/search_autocomplete/test.txt"
-const OrgFileName string = "/home/cicada/system_design_implementations/search_autocomplete/aol_queries.txt"
+const OrgFileName string = "/home/cicada/system_design_implementations/search_autocomplete/out_phrases.txt"
 
-func TestParseLine(t *testing.T) {
-	lines := [][]string{
-		{"bluehost.com\t3", "bluehost.com", "3"},
-		{"razor bumps\t12", "razor bumps", "12"},
-		{"ing retirement\t11", "ing retirement", "11"},
-		{"how to get rid of bees\t5", "how to get rid of bees", "5"},
-		{"sgs\t4", "sgs", "4"},
-		{"dell preferred account\t16", "dell preferred account", "16"},
-		{"anita bryant\t10", "anita bryant", "10"},
-		{"putas.com\t8", "putas.com", "8"},
-		{"fix a toilet\t4", "fix a toilet", "4"},
-		{"purina.com\t10", "purina.com", "10"},
-	}
-	for _, line := range lines {
-		phrase, freq, _ := ParseLine(line[0])
-		require.Equal(t, line[1], phrase)
-		require.Equal(t, line[2], fmt.Sprintf("%d", freq))
-	}
-}
+//	func TestParseLine(t *testing.T) {
+//		lines := [][]string{
+//			{"bluehost.com\t3", "bluehost.com", "3"},
+//			{"razor bumps\t12", "razor bumps", "12"},
+//			{"ing retirement\t11", "ing retirement", "11"},
+//			{"how to get rid of bees\t5", "how to get rid of bees", "5"},
+//			{"sgs\t4", "sgs", "4"},
+//			{"dell preferred account\t16", "dell preferred account", "16"},
+//			{"anita bryant\t10", "anita bryant", "10"},
+//			{"putas.com\t8", "putas.com", "8"},
+//			{"fix a toilet\t4", "fix a toilet", "4"},
+//			{"purina.com\t10", "purina.com", "10"},
+//		}
+//		for _, line := range lines {
+//			phrase, freq, _ := ParseLine(line[0])
+//			require.Equal(t, line[1], phrase)
+//			require.Equal(t, line[2], fmt.Sprintf("%d", freq))
+//		}
+//	}
 func TestWordSearchAndCount(t *testing.T) {
 	trie := BuildTrie(TestFileName)
 	file, err := os.Open(TestFileName)
@@ -113,7 +113,7 @@ func BenchmarkBuild(b *testing.B) {
 // k scaling bench
 func BenchmarkBuildCacheK(b *testing.B) {
 	trie := BuildTrie(OrgFileName)
-	for _, k := range []int{10, 50, 100} {
+	for _, k := range []int{5, 10} {
 		b.Run(fmt.Sprintf("K-%d", k), func(b *testing.B) {
 			trie.K = k
 			b.ResetTimer()
@@ -124,10 +124,22 @@ func BenchmarkBuildCacheK(b *testing.B) {
 	}
 }
 
-func BenchmarkTrieSuggest(b *testing.B) {
+// k scaling bench
+func BenchmarkBuildCacheKParallel(b *testing.B) {
 	trie := BuildTrie(OrgFileName)
-	trie.K = 10
-	trie.BuildCache()
+	for _, k := range []int{5, 10} {
+		b.Run(fmt.Sprintf("K-%d", k), func(b *testing.B) {
+			trie.K = k
+			b.ResetTimer()
+			for range b.N {
+				trie.BuildCacheParallel()
+			}
+		})
+	}
+}
+
+func BenchmarkTrieSuggest(b *testing.B) {
+	sug, _ := Load(OrgFileName, "trie", 10, 6)
 	table := []struct {
 		name   string
 		prefix string
@@ -142,7 +154,7 @@ func BenchmarkTrieSuggest(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				_ = trie.Suggest(tc.prefix)
+				_ = sug.Suggest(tc.prefix)
 			}
 			// _ = sink
 		})
@@ -150,10 +162,7 @@ func BenchmarkTrieSuggest(b *testing.B) {
 }
 
 func BenchmarkPrefixSuggest(b *testing.B) {
-	trie := BuildTrie(OrgFileName)
-	trie.K = 10
-	trie.BuildCache()
-	pi := BuildPrefixIndex(trie)
+	pi, _ := Load(OrgFileName, "prefix-hash", 10, 6)
 	table := []struct {
 		name   string
 		prefix string

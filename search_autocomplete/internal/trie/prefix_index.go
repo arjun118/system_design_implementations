@@ -1,7 +1,5 @@
 package trie
 
-import "slices"
-
 type PrefixIndex map[string][]Reco
 
 func NewPrefixIndex() PrefixIndex {
@@ -10,19 +8,8 @@ func NewPrefixIndex() PrefixIndex {
 
 func BuildPrefixIndex(t *Trie) PrefixIndex {
 	pi := NewPrefixIndex()
-	// traverse trie and populate the prefix index and return
-	IterateTrie(t.Root, "", pi)
+	t.walkForIndex(t.Root, "", pi)
 	return pi
-}
-
-func IterateTrie(node *Node, prefix string, pi PrefixIndex) {
-	if len(node.Children) == 0 {
-		return
-	}
-	for key, child := range node.Children {
-		IterateTrie(child, prefix+string(key), pi)
-		pi[prefix+string(key)] = slices.Clone(child.Top)
-	}
 }
 
 func (pi PrefixIndex) Suggest(prefix string) []string {
