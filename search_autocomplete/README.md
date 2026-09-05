@@ -11,8 +11,8 @@
 | 3     | Cache population + benchmark gate                | ✅ done |
 | 4     | HTTP server + web UI                             | ✅ done |
 | 5     | Prefix hash map (flat cache)                     | ✅ done |
-| 6     | Multiword dataset at scale (Google ngrams, 10M+) | ⬜      |
-| 7     | MongoDB persistence                              | ⬜      |
+| 6     | Multiword dataset at scale (Google ngrams, 10M+) | ⬜ done |
+| 7     | MongoDB persistence (seeder + 3-tier serving)    | ✅ done |
 | 8     | Query logging + adaptive learning (Mongo/Redis)  | ⬜      |
 | 9     | Toy sharding                                     | ⬜      |
 
@@ -254,28 +254,59 @@ Word-boundary semantics come free: type `starbuc` (mid-word) → full phrases; t
 
 ---
 
-## Phase 7 — MongoDB persistence
+## Phase 7 — MongoDB persistence (done)
+
+**Goal as implemented:** the full prefix index is built and persisted in MongoDB by a streaming seeder (`cmd/seeder`), and the API serves from a three-tier read path layered over Mongo. Mongo is the source of truth (the full prefix space); RAM and Redis hold only the hottest prefixes.
 
 **Schema.**
 
 ```
-collection prefixes: { _id: "<prefix>", top: [ { w: "apple", f: 12345 }, ... ] }
-collection words:    { _id: "<word>",   f: 12345 }
-collection queries:  { q: "<query>", ts: ISODate(...) }   // Phase 8
+db:          search_autocomplete
+collection:  prefix_index
+doc:         { prefix: "<prefix>", top: [ { word: "apple", freq: 12345 }, ... ] }
+unique index on: prefix
 ```
 
-`_id` = prefix gives a natural unique index and point lookups. With the Phase 5 flat map done, this is a **direct 1:1 dump** — one map entry = one document (no trie walk needed).
+`top` holds the top-`k` completions for that prefix (default `k = 10`), kept sorted by freq. `prefix` is a normal indexed field rather than `_id`, so the seeder can look up the existing document for a prefix and **merge** into it — the collection does not have to be empty before a seed.
 
-**Serving vs durability — keep them separate.**
+**Seeding (`cmd/seeder`) — build once, idempotent re-runs.**
 
-- Hot path: in-memory `PrefixIndex`, loaded once at boot
-- Mongo: source of truth for persistence and (later) learning — also the **cold tier** for the 10M dataset (Phase 6): the full prefix space lives in Mongo; only the hot subset is loaded into RAM
-- A Mongo round-trip is ~0.1–1 ms. Never read-through on the hot path.
-- Initial seed can use `mongoimport` from a JSONL dump of `PrefixIndex` — no driver code needed for the first load
+Input is a canonical, lexicographically-sorted file of `phrase<TAB>freq` (produced by the Phase 6 preprocessing tools). A memory-aware recursive partition turns "build the whole index" into many small, independent jobs:
 
-**Deliverables:** `docker-compose.yml` (`mongo:7`), `cmd/seed` (build + dump), `cmd/server` (load at boot), Mongo-backed tests behind a `//go:build mongo` tag.
+1. `Scan` a prefix's byte range and, using the longest-common-prefix trick on the sorted input, count each child prefix's distinct-prefix size without recounting shared characters.
+2. If a child's estimated size (`DistinctPrefixes × ~125 B`) exceeds the budget it is **split** and recursed into; otherwise it is queued as a leaf build job.
+3. Six build workers consume leaf jobs, rebuild each bucket's per-prefix top-k heaps in memory, and hand them to a merge worker.
+4. A single merge worker batches results and writes to Mongo, **merging** each prefix's existing `top` with the incoming top-k and truncating back to `k`. Re-seeding the same file is therefore safe — no duplicates or drift.
 
-**Exit:** restart a server → all suggestions still served; `mongosh` shows `prefixes.findOne({_id: "a"}).top`.
+```
+        canonical_sorted.txt
+                │  recursive memory-aware partition (SPLIT)
+                ▼
+        ┌──────────────────────────┐
+        │  6 build workers (top-k) │──▶ 1 merge worker ──▶ Mongo `prefix_index`
+        └──────────────────────────┘
+```
+
+The build and merge workers are drained (via `sync.WaitGroup` + a completion signal) after the partition pass, so the process exits only after every batch is flushed to Mongo.
+
+**Serving (`cmd/api` + `internal/store`) — three tiers.**
+
+```
+                /api/suggest
+                     │
+        ┌────────────┼─────────────┐
+   in-memory        Redis         Mongo
+   (hottest)       (LFU cache)   (durable, full)
+   memUnits <     redisUnits <    all prefixes
+```
+
+- At boot, `Init(memUnits, redisUnits)` fetches the top `redisUnits` prefixes ordered by `top[0].freq` descending, loading the hottest `memUnits` into RAM and pipelining all `redisUnits` into Redis.
+- A suggestion is served from RAM → Redis → Mongo, in that order. A Mongo hit that missed both caches is written back to Redis asynchronously.
+- Redis uses `allkeys-lfu` eviction (see `docker-compose.yml`), so it behaves as a bounded, frequency-skewed cache rather than a plain LRU.
+
+**Exit condition met:** restart the API → suggestions are still served (RAM/Redis re-seeded from Mongo at boot); `mongosh` shows `db.prefix_index.findOne({prefix: "a"}).top` ranked by freq.
+
+**Note:** Redis as a serving tier was pulled forward from Phase 8. Phase 8's _learning_ side (query log, ~60 s worker, trending, atomic swap) is still outstanding.
 
 ---
 
@@ -358,8 +389,11 @@ go run ./cmd/preprocess_ngrams -dir ngram2009 -out out_phrases.txt
 # fallback: full AOL scale (query-shaped, cleaner than book OCR)
 go run ./cmd/preprocess_aol -min-freq 1 -top-n 0 -out out_phrases.txt
 
-# run the API (Phases 4+)
-go run ./cmd/api -impl trie      # or: -impl prefix-hash
+# seed Mongo prefix index (Phase 7) - input: canonical_sorted.txt (phrase<TAB>freq, lexicographically sorted)
+go run ./cmd/seeder -file google_books_ds/canonical_sorted.txt -k 10
+
+# run the API (Phase 7+) - requires MongoDB + Redis (see docker-compose.yml)
+go run ./cmd/api -addr :8080
 curl 'localhost:8080/api/suggest?q=goo'
 
 # load tests (Phase 4/9)
@@ -368,14 +402,24 @@ wrk -t4 -c100 -d30s 'http://localhost:8080/api/suggest?q=a&k=10'
 
 ## Appendix B — Docker compose (Phases 7+)
 
+Live file: `docker-compose.yml` — Mongo + Redis + the `api` service (which builds the repo image). Abridged:
+
 ```yaml
 services:
-    mongo:
-        image: mongo:7
+    mongodb:
+        image: mongo:6.0
         ports: ["27017:27017"]
     redis:
-        image: redis:7-alpine
+        image: redis:alpine
+        command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lfu
         ports: ["6379:6379"]
+    api:
+        build: .
+        ports: ["8080:8080"]
+        environment:
+            - REDIS_ADDR=redis:6379
+            - MONGO_URI=mongodb://mongodb:27017
+        depends_on: [mongodb, redis]
 ```
 
 ---
