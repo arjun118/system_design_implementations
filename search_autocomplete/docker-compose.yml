@@ -1,0 +1,69 @@
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - autocomplete_net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lfu
+      --lfu-decay-time 1
+      --lfu-log-factor 10
+    volumes:
+      - redis_data:/data
+    networks:
+      - autocomplete_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: api
+    restart: on-failure
+    ports:
+      - "8080:8080"
+    command: ["./api"]
+    environment:
+      - REDIS_ADDR=redis:6379
+      - MONGO_URI=mongodb://mongodb:27017
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    networks:
+      - autocomplete_net
+
+networks:
+  autocomplete_net:
+    driver: bridge
+
+volumes:
+  mongo_data:
+    external: true
+    name: mongo_data
+  redis_data:

@@ -138,12 +138,12 @@
       const data = await res.json();
       if (id !== reqId) return; // a newer keystroke superseded this response
       render(data.suggestions || []);
-      showTiming(data.duration_ns);
+      showTimingAndSource(data.source,data.duration_ns);
     } catch (err) {
       if (err.name === 'AbortError') return;
       if (id !== reqId) return;
       render([]);
-      showTiming(null);
+      showTimingAndSource(null,null);
     }
   }
 
@@ -198,12 +198,12 @@
     timing.textContent = '';
   }
 
-  function showTiming(ns) {
+  function showTimingAndSource(source, ns) {
     if (ns == null || ns < 0) {
       timing.textContent = '';
       return;
     }
-    timing.textContent = `suggested in ${fmtDuration(ns)}`;
+    timing.textContent = `suggested in ${fmtDuration(ns)}, by: ${source}`;
   }
 
   function fmtDuration(ns) {

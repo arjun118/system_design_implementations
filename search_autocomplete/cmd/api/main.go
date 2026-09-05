@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -10,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arjun118/autocomplete/internal/trie"
+	"github.com/arjun118/autocomplete/internal/store"
+	"github.com/arjun118/autocomplete/internal/suggest"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -21,12 +23,13 @@ var staticFS embed.FS
 // suggester is the serving structure, loaded once at boot. Both
 // implementations (trie, prefix-hash) are read-only after Load, so concurrent
 // handlers are safe.
-var suggester trie.Suggester
+var suggester suggest.Suggester
 
 type suggestResponse struct {
 	Prefix      string   `json:"prefix"`
 	Suggestions []string `json:"suggestions"`
 	DurationNS  int64    `json:"duration_ns"`
+	Source      string   `json:"source"`
 }
 
 type errorResponse struct {
@@ -58,7 +61,7 @@ func HandleSuggest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	res := suggester.Suggest(q)
+	res, source := suggester.Suggest(q)
 	elapsed := time.Since(start)
 	if res == nil {
 		res = []string{} // serialize as [] not null
@@ -74,7 +77,7 @@ func HandleSuggest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, suggestResponse{Prefix: q, Suggestions: res, DurationNS: elapsed.Nanoseconds()})
+	writeJSON(w, http.StatusOK, suggestResponse{Prefix: q, Suggestions: res, DurationNS: elapsed.Nanoseconds(), Source: source})
 }
 
 func HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -105,22 +108,27 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 func main() {
 	var (
-		file = flag.String("file", "/home/cicada/system_design_implementations/search_autocomplete/aol_queries.txt",
-			"data file (phrase TAB freq)")
-		impl       = flag.String("impl", "trie", "implementation: trie | prefix-hash")
-		k          = flag.Int("k", 5, "cache size (top-k suggestions)")
-		addr       = flag.String("addr", ":8080", "listen address")
-		cacheDepth = flag.Int("cd", 6, "cache depth (cache only shallow nodes - not deep nodes")
+		// 	file = flag.String("file", "/home/cicada/system_design_implementations/search_autocomplete/aol_queries.txt",
+		// 		"data file (phrase TAB freq)")
+		// 	impl       = flag.String("impl", "trie", "implementation: trie | prefix-hash")
+		// 	k          = flag.Int("k", 5, "cache size (top-k suggestions)")
+		addr = flag.String("addr", ":8080", "listen address")
+	// 	cacheDepth = flag.Int("cd", 6, "cache depth (cache only shallow nodes - not deep nodes")
 	)
 	flag.Parse()
 
-	s, err := trie.Load(*file, *impl, *k, *cacheDepth)
+	// s, err := trie.Load(*file, *impl, *k, *cacheDepth)
+	// if err != nil {
+	// 	log.Fatalf("load %s (%s): %v", *file, *impl, err)
+	// }
+	var err error
+	suggester, err = store.NewSuggester()
+	ctx := context.Background()
+	// defer cancel()
+	err = suggester.Init(ctx, 10000, 100000)
 	if err != nil {
-		log.Fatalf("load %s (%s): %v", *file, *impl, err)
+		log.Fatal(err)
 	}
-	suggester = s
-	log.Printf("loaded suggester: impl=%s k=%d", *impl, *k)
-
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
