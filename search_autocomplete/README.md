@@ -312,32 +312,46 @@ The build and merge workers are drained (via `sync.WaitGroup` + a completion sig
 
 ## Phase 8 — Query logging + adaptive learning (worker, Mongo, Redis)
 
+Runs on the three-tier read path from Phase 7. There is **no single in-memory
+`PrefixIndex` holding the whole vocabulary** — RAM and Redis hold only the _hottest_
+prefixes, and a cold miss reads through to Mongo. So "rebuild + swap" applies to the hot
+tiers, not to a full snapshot (which would not fit on a memory-constrained box at Phase 6
+scale).
+
 **Pipeline.**
 
-1. **Log** — HTTP handler appends `{q, ts}` to Mongo `queries` on every suggestion request.
+1. **Log** — HTTP handler appends `{q, ts}` to the Mongo `queries` log on every _committed_ query (see Appendix C — not per keystroke).
 2. **Aggregate** — worker goroutine every ~60 s: buffer recent queries, `zincrby` into a Redis sorted set `recent` (windowed), count into Mongo.
-3. **Learn** — `f_new = α·f_old + (1−α)·window_count` (EMA) or additive boost + re-normalize.
-4. **Reapply** — rebuild the `PrefixIndex` off the hot path, then atomically swap: serve behind `atomic.Pointer[PrefixIndex]`. Readers never see a half-updated index. (The Phase 5 flat map makes this a single map build + swap — no tree walks.)
+3. **Learn** — `f_new = α·f_old + (1−α)·window_count` (EMA) or additive boost, applied to the durable frequency state.
+4. **Reapply** — the worker (a) merges each promoted word into the affected prefixes' top-k in Mongo `prefix_index` (the same merge Phase 7's seeder uses), then (b) refreshes the hot path: recompute the top-N prefix list from Mongo and `atomic.Pointer`-swap the RAM hot map, and rewrite the affected Redis keys. Because only the hot subset is ever in RAM, the swap is cheap — no whole-corpus rebuild.
 5. **Trending** — `zrevrange recent 0 9` from Redis → `/api/trending` endpoint, pushed to clients via SSE (see the Phase 4 transport decision).
 
 **Division of labor — the classic mistake, avoided:**
 
-| Component                | Role                                             |
-| ------------------------ | ------------------------------------------------ |
-| In-memory `PrefixIndex`  | serves reads (hot path)                          |
-| Mongo `queries`          | durable query log — source of truth for learning |
-| Mongo `words`/`prefixes` | durable learned state (write-behind)             |
-| Redis                    | hot cache for popular prefixes + trending window |
+| Component            | Role                                                   |
+| -------------------- | ------------------------------------------------------ |
+| RAM hot map          | serves the hottest prefixes (L1)                       |
+| Redis                | L2 cache for the next tier + trending window           |
+| Mongo `prefix_index` | authoritative full store — read through on a cold miss |
+| Mongo `queries`      | durable query log — source of truth for learning       |
 
-Redis is a cache/trend board, **not** the source of truth. If it dies, serving continues.
+Redis is a cache/trend board, **not** the source of truth. If it dies, serving continues
+(RAM hot map first, Mongo read-through after). Mongo is authoritative for both serving
+(the full prefix space) and learning.
 
-**Consistency:** eventual consistency with a ~1-minute staleness budget. Never write-through per keystroke — buffer and batch (that's the worker's job). Watch write amplification.
+**Consistency:** eventual consistency with a ~1-minute staleness budget. Never
+write-through per keystroke — buffer and batch (that's the worker's job). Watch write
+amplification on the affected prefix documents.
 
-**Deliverables:** `QueryLogger` interface (Mongo impl + no-op for tests), `worker.go` (aggregate → rebuild → atomic swap), `/api/trending`.
+**Deliverables:** `QueryLogger` interface (Mongo impl + no-op for tests), `worker.go`
+(aggregate → merge into Mongo → refresh hot tiers), `/api/trending`.
 
-**Exit:** type a low-freq word 10× in the UI and within ~1 min it outranks previously-higher-frequency words; restart the server → learned boost survives (durable in Mongo).
+**Exit:** type a low-freq word 10× in the UI and within ~1 min it outranks
+previously-higher-frequency words; restart the server → learned boost survives (durable in
+Mongo `prefix_index`, re-loaded into the hot tiers at boot).
 
-**See also:** Appendix C for the full design of handling unknown queries (misses are never written to the hot index).
+**See also:** Appendix C for the full design of handling unknown queries (misses are never
+written to the hot serving structures on the request path).
 
 ---
 
@@ -411,34 +425,27 @@ services:
         ports: ["27017:27017"]
     redis:
         image: redis:alpine
-        command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lfu
-        ports: ["6379:6379"]
-    api:
-        build: .
-        ports: ["8080:8080"]
-        environment:
-            - REDIS_ADDR=redis:6379
-            - MONGO_URI=mongodb://mongodb:27017
-        depends_on: [mongodb, redis]
 ```
-
----
 
 ## Appendix C — Adaptive learning: handling unknown queries (Phase 8)
 
-**One rule governs everything: misses are never written to the hot index on the request path.**
+**One rule governs everything: misses are never written to the hot serving structures on the request path.**
 
-Data flows one way — Mongo is the durable source of truth, and the in-memory `PrefixIndex` is a read-only snapshot rebuilt from it:
+Reads follow the Phase 7 three-tier path: **RAM hot map → Redis → Mongo**. RAM and Redis
+hold only the _hottest_ prefixes; Mongo `prefix_index` is the authoritative full store and
+is read through on a cold miss. Learning always flows **toward** Mongo (durable truth) and
+from Mongo back into the hot tiers — never the reverse:
 
 ```mermaid
-flowchart LR
-    U[User] -->|keystrokes| S[GET /api/suggest]
-    S -->|serves from read-only copy| I[In-memory PrefixIndex]
-    U -->|submitted query| L[(Mongo queries log)]
-    W[Worker every ~60s] -->|aggregate window + EMA| L
-    W -->|write learned state| M[(Mongo words + prefixes)]
-    W -->|rebuild + atomic swap| I
-    M -->|load at boot| I
+flowchart TD
+    U["User keystrokes"] --> S["GET /api/suggest"]
+    S -->|"serve from hot tiers"| H["RAM + Redis"]
+    S -->|"cache miss"| M[("Mongo prefix_index")]
+    U -->|"committed query"| L[("Mongo queries log")]
+    W["worker every ~60s"] -->|"aggregate + EMA"| L
+    W -->|"merge promoted top-k"| M
+    W -->|"refresh + swap hot map"| H
+    M -->|"load top-N at boot"| H
 ```
 
 **What happens when the user types something not in the tree** — three distinct cases:
@@ -451,23 +458,28 @@ flowchart LR
 
 **Why not to add misses on the fly:**
 
-- **Junk pollution** — typos (`starbcuks`) and partial words would permanently enter the tree.
+- **Junk pollution** — typos (`starbcuks`) and partial words would permanently enter the store.
 - **Write amplification** — the Phase 8 constraint: never write-through per keystroke.
-- **Invalidation complexity** — one new word touches all its prefixes (`c`, `cr`, `cry`, … `cryptocurrency`), each needing a top-K merge. A rebuild is a pure function of the word list; a per-keystroke update needs locks.
+- **Invalidation complexity** — one new word touches all its prefixes (`c`, `cr`, `cry`, … `cryptocurrency`), each needing a top-K merge in Mongo plus a hot-tier refresh. A batch promotion is a pure function of the word list; a per-keystroke update needs locks.
 
-**Serve a suggestion ≠ learn a frequency.** A new query is captured durably without ever being served back. `cryptocurrency` appears as a suggestion only when it earns a top-K slot — a 1-occurrence new word shouldn't displace `cellulite` from `c`'s top-10.
+**Serve a suggestion ≠ learn a frequency.** A new query is captured durably without ever
+being served back. `cryptocurrency` appears as a suggestion only when it earns a top-K slot
+— a 1-occurrence new word shouldn't displace `cellulite` from `c`'s top-10.
 
 **The worker loop (every ~60 s):**
 
 1. Pull the window's submitted queries from Mongo `queries` (or a Redis `LIST` buffer).
-2. Count per query; apply `f_new = α·f_old + (1−α)·window_count` (EMA) against `words`.
-3. **Promotion threshold:** only words with `window_count ≥ T` (e.g., 3) are written into `words` — everything below stays in the log. This is the anti-junk filter.
-4. Rebuild the `PrefixIndex` off the hot path; swap via `atomic.Pointer`. New words appear under all their prefixes, ranked by earned frequency.
+2. Count per query; apply `f_new = α·f_old + (1−α)·window_count` (EMA) against the durable frequency state.
+3. **Promotion threshold:** only words with `window_count ≥ T` (e.g., 3) are written into state — everything below stays in the log. This is the anti-junk filter.
+4. **Reapply (three-tier):** for each promoted word, merge it into the top-k of every prefix it extends in Mongo `prefix_index` (same merge Phase 7's seeder uses); then refresh the hot path — recompute/`atomic.Pointer`-swap the RAM hot map and rewrite the affected Redis keys. New words appear under all their prefixes, ranked by earned frequency, and survive restart because they are durable in Mongo.
 
 **Log the submitted query, not the keystroke.** Keystroke prefixes (`s`, `st`, `sta`, `star`…) are typing noise; the learning signal is the query the user commits (Enter / click / selecting a suggestion).
 
-**Realtime ≠ per-keystroke.** A 30–60 s cadence is imperceptible for autocomplete (real systems do the same). The batch + atomic-swap model _is_ the realtime story: bounded staleness of ~1 minute, zero locks, zero torn reads. Mongo never "fetches from" the in-memory tree — it's the other way around.
+**Realtime ≠ per-keystroke.** A 30–60 s cadence is imperceptible for autocomplete (real
+systems do the same). The batch + hot-swap model _is_ the realtime story: bounded staleness
+of ~1 minute, zero locks, zero torn reads. Hot tiers are derived from Mongo; Mongo is never
+derived from the in-memory structures.
 
-**One-sentence summary:** _Misses are never written to the hot index — they're logged as submitted queries, aggregated by a worker, and promoted into a rebuilt index only when they clear a frequency threshold; Mongo is the source of truth the index is rebuilt from, never the other way around._
+**One-sentence summary:** _Misses are never written to the hot structures on the request path — they're logged as submitted queries, aggregated by a worker, and promoted into Mongo's durable prefix index (then the hot tiers) only when they clear a frequency threshold; Mongo is the source of truth the caches are derived from, never the other way around._
 
 **Stretch (not building):** fuzzy fallback for true misses — edit-distance "did you mean...?" suggestions, orthogonal to learning.

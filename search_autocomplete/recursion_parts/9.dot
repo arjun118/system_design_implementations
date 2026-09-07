@@ -1,0 +1,6 @@
+digraph Recursion {
+  rankdir=TB;
+  node [fontname="Helvetica", fontsize=12];
+  edge [arrowsize=0.6];
+  n10 [label="9", shape=circle];
+}

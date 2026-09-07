@@ -191,29 +191,77 @@ func Scan(f *os.File, prefix string, start int64, end int64) ScanResult {
 	}
 }
 
-func processBucket(f *os.File, prefix string, start int64, end int64, collection *mongo.Collection,
-	ctx context.Context) {
+// func processBucket(f *os.File, prefix string, start int64, end int64, collection *mongo.Collection,
+// 	ctx context.Context) {
+// 	scanResult := Scan(f, prefix, start, end)
+
+// 	for _, child := range scanResult.Children {
+// 		estimated := float64(child.DistinctPrefixes) * bytesPerPrefix
+
+// 		if estimated <= memoryBudget {
+// 			// fmt.Printf(
+// 			// 	"BUILD  %-10s prefixes=%d estimated=%.2f MB\n",
+// 			// 	child.Prefix,
+// 			// 	child.DistinctPrefixes,
+// 			// 	estimated/(1024*1024),
+// 			// )
+// 			// pi := buildPrefixIndex(f, child)
+// 			// fmt.Printf("MERGE  %-10s prefixes=%d\n",
+// 			// 	child.Prefix,
+// 			// 	len(pi),
+// 			// )
+// 			// if err := mergeIntoMongo(ctx, collection, pi); err != nil {
+// 			// 	panic(err)
+// 			// }
+// 			// we will just queue the index build job
+// 			indexBuildJobs <- child
+// 		} else {
+// 			fmt.Printf(
+// 				"SPLIT  %-10s prefixes=%d estimated=%.2f MB\n",
+// 				child.Prefix,
+// 				child.DistinctPrefixes,
+// 				estimated/(1024*1024),
+// 			)
+
+// 			processBucket(
+// 				f,
+// 				child.Prefix,
+// 				child.Start,
+// 				child.End,
+// 				collection,
+// 				ctx,
+// 			)
+// 		}
+// 	}
+// }
+
+func processBucket(
+	f *os.File,
+	prefix string,
+	start int64,
+	end int64,
+	collection *mongo.Collection,
+	ctx context.Context,
+	graph *RecursionGraph,
+	nodeID int,
+) {
+	if nodeID == -1 {
+		nodeID = graph.BucketNode(prefix, start, end)
+	}
+
 	scanResult := Scan(f, prefix, start, end)
 
 	for _, child := range scanResult.Children {
 		estimated := float64(child.DistinctPrefixes) * bytesPerPrefix
 
 		if estimated <= memoryBudget {
-			// fmt.Printf(
-			// 	"BUILD  %-10s prefixes=%d estimated=%.2f MB\n",
-			// 	child.Prefix,
-			// 	child.DistinctPrefixes,
-			// 	estimated/(1024*1024),
-			// )
-			// pi := buildPrefixIndex(f, child)
-			// fmt.Printf("MERGE  %-10s prefixes=%d\n",
-			// 	child.Prefix,
-			// 	len(pi),
-			// )
-			// if err := mergeIntoMongo(ctx, collection, pi); err != nil {
-			// 	panic(err)
-			// }
-			// we will just queue the index build job
+			graph.BuildNode(
+				nodeID,
+				child.Prefix,
+				child.DistinctPrefixes,
+				estimated,
+			)
+
 			indexBuildJobs <- child
 		} else {
 			fmt.Printf(
@@ -223,6 +271,15 @@ func processBucket(f *os.File, prefix string, start int64, end int64, collection
 				estimated/(1024*1024),
 			)
 
+			childNodeID := graph.SplitNode(
+				nodeID,
+				child.Prefix,
+				child.Start,
+				child.End,
+				child.DistinctPrefixes,
+				estimated,
+			)
+
 			processBucket(
 				f,
 				child.Prefix,
@@ -230,6 +287,8 @@ func processBucket(f *os.File, prefix string, start int64, end int64, collection
 				child.End,
 				collection,
 				ctx,
+				graph,
+				childNodeID,
 			)
 		}
 	}
@@ -435,6 +494,20 @@ func Seed(file string) {
 	// merges pi to mongo collection in the batches of 1000
 	done := make(chan struct{})
 	go MongoMergeWorker(ctx, collection, done)
+	// processBucket(
+	// 	f,
+	// 	"",
+	// 	0,
+	// 	fileInfo.Size(),
+	// 	collection,
+	// 	ctx,
+	// )
+	graph, err := NewRecursionGraph("recursion.dot")
+	if err != nil {
+		panic(err)
+	}
+	defer graph.Close()
+
 	processBucket(
 		f,
 		"",
@@ -442,6 +515,8 @@ func Seed(file string) {
 		fileInfo.Size(),
 		collection,
 		ctx,
+		graph,
+		-1,
 	)
 	// close- no new work , inflight /queued job is not affected
 	close(indexBuildJobs)

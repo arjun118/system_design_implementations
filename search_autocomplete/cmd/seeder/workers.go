@@ -11,7 +11,7 @@ import (
 
 func IndexBuildingWorkers(path string, wg *sync.WaitGroup) {
 	for range 6 {
-		// there are 5 workers at any time - working on building prefix indexes
+		// there are 6 workers at any time - working on building prefix indexes
 		// each's memory limit is capped to 500mb (done via estimated memory from the processBucket)
 		wg.Go(func() {
 			f, err := os.Open(path) // one handle per worker
