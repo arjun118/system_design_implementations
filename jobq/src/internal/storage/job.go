@@ -70,3 +70,90 @@ func (s *Store) GetJob(ctx context.Context, jobID uuid.UUID) (*Job, error) {
 	}
 	return job, nil
 }
+
+func (s *Store) MarkComplete(ctx context.Context, jobID uuid.UUID) error {
+	query := `
+	update jobs
+	set status='completed'
+	where id=$1
+	`
+	args := []any{jobID}
+	result, err := s.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to mark job complete, %w", err)
+	}
+	if result.RowsAffected() != 0 {
+		return fmt.Errorf("statue mismatch, no job found to mark complete, %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MarkFailure(ctx context.Context, jobID uuid.UUID) error {
+	query := `
+	update jobs
+	set status='failed'
+	where id=$1
+	`
+	args := []any{jobID}
+	result, err := s.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to mark job failure, %w", err)
+	}
+	if result.RowsAffected() != 0 {
+		return fmt.Errorf("statue mismatch, no job found to mark failure, %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ClaimPendingJob(ctx context.Context, queues []string) (*Job, error) {
+	query := `
+        WITH claimable AS (
+            SELECT id FROM jobs
+            WHERE status = 'pending'
+              AND run_at <= now()
+              AND queue = ANY($1)
+            ORDER BY priority DESC, created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE jobs
+        SET status = 'running',
+            attempts = jobs.attempts + 1,
+            updated_at = now()
+        FROM claimable
+        WHERE jobs.id = claimable.id
+        RETURNING jobs.id, jobs.queue, jobs.job_type, jobs.payload, jobs.status,
+                  jobs.priority, jobs.attempts, jobs.max_attempts, jobs.run_at,
+                  jobs.created_at, jobs.updated_at;
+        `
+	var j Job
+	err := s.pool.QueryRow(ctx, query, queues).Scan(
+		&j.ID, &j.Queue, &j.JobType, &j.Payload, &j.Status,
+		&j.Priority, &j.Attempts, &j.MaxAttempts, &j.RunAt,
+		&j.CreatedAt, &j.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNoJobAvailable
+		}
+		return nil, fmt.Errorf("failed to claim pending job: %w", err)
+	}
+	return &j, nil
+}
+
+func (s *Store) MarkDead(ctx context.Context, jobID uuid.UUID) error {
+	query := `
+	update jobs
+	set status='dead'
+	where id=$1
+	`
+	args := []any{jobID}
+	result, err := s.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to mark job dead, %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("statue mismatch, no job found to mark dead, %w", err)
+	}
+	return nil
+}

@@ -1,13 +1,34 @@
 package httpapi
 
 import (
-	"io"
+	"errors"
+	"fmt"
 	"net/http"
 
+	"arjun118.github.io/jobq/internal/storage"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
-func (s *Server) NAckJob(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, "failure: "+uuid.New().String())
+func (s *Server) NAck(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	jobID, err := uuid.Parse(idStr)
+	if err != nil {
+		s.badRequestResponse(w, r, fmt.Errorf("invalid job id: must be a valid uuid"))
+		return
+	}
+
+	err = s.store.MarkFailure(r.Context(), jobID)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrJobNotFound):
+			s.notFoundResponse(w, r)
+		default:
+			s.serverErrorResponse(w, r, err)
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+
 }

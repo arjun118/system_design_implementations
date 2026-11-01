@@ -23,9 +23,9 @@ func (s *Server) setupRoutes() {
 	r.Get("/v1/queues/{name}/stats", s.GetQueueStats)
 
 	// worker endpoints
-	r.Post("/v1/jobs/claim", s.ClaimJob)
-	r.Post("/v1/jobs/{id}/ack", s.AckJob)
-	r.Post("/v1/jobs/{id}/nack", s.NAckJob)
+	r.Post("/v1/jobs/claim", s.Claim)
+	r.Post("/v1/jobs/{id}/ack", s.Ack)
+	r.Post("/v1/jobs/{id}/nack", s.NAck)
 	r.Post("/v1/jobs/{id}/heartbeat", s.ExtendLease)
 	s.router = r
 }

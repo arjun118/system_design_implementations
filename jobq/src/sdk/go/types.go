@@ -1,6 +1,7 @@
 package jobq
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -13,6 +14,10 @@ type SubmitRequest struct {
 	Payload     json.RawMessage `json:"payload"`
 	Priority    int             `json:"priority,omitempty"`
 	MaxAttempts int             `json:"max_attempts,omitempty"`
+}
+
+type ClaimRequest struct {
+	Queues []string `json:"queues"`
 }
 
 type AcceptJobResponse struct {
@@ -42,3 +47,6 @@ type QueueStats struct {
 	DeadLettered int64  `json:"dead_lettered" db:"dead_lettered"`
 	Total        int64  `json:"total" db:"total"`
 }
+
+// handler types
+type Handler func(ctx context.Context, payload json.RawMessage) error

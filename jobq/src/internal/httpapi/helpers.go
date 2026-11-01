@@ -9,8 +9,6 @@ import (
 	"arjun118.github.io/jobq/internal/validator"
 )
 
-type envelope map[string]any
-
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data any, headers http.Header) error {
 	js, err := json.Marshal(data)
 	if err != nil {

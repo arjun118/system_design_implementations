@@ -98,3 +98,89 @@ func (c *Client) GetQueueStats(ctx context.Context, queueName string) (*QueueSta
 	}
 	return &stats, nil
 }
+
+func (c *Client) Claim(ctx context.Context, queues []string) (*Job, error) {
+	body, err := json.Marshal(ClaimRequest{
+		Queues: queues,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request body, %w", err)
+	}
+	endpoint, err := url.JoinPath(c.baseURL, "v1", "jobs", "claim")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse endpoint specific url, %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create http request, %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request, %w", err)
+	}
+	defer httpResp.Body.Close()
+	switch httpResp.StatusCode {
+	case http.StatusNoContent:
+		return nil, ErrNoJobAvailable
+	case http.StatusOK:
+		var job Job
+		if err := json.NewDecoder(httpResp.Body).Decode(&job); err != nil {
+			return nil, fmt.Errorf("failed to decode job response: %w", err)
+		}
+		return &job, nil
+	default:
+		return nil, fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+
+}
+
+func (c *Client) Ack(ctx context.Context, jobID uuid.UUID) error {
+	endpoint, err := url.JoinPath(c.baseURL, "v1", "jobs", jobID.String(), "ack")
+	if err != nil {
+		return fmt.Errorf("failed to parse endpoint specific url, %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create http request, %w", err)
+	}
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send request, %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	switch httpResp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return ErrJobNotFound
+	default:
+		return fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+}
+
+func (c *Client) NAck(ctx context.Context, jobID uuid.UUID, token int, workerError error, permanent bool) error {
+	endpoint, err := url.JoinPath(c.baseURL, "v1", "jobs", jobID.String(), "nack")
+	if err != nil {
+		return fmt.Errorf("failed to parse endpoint specific url, %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create http request, %w", err)
+	}
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send request, %w", err)
+	}
+	defer httpResp.Body.Close()
+	switch httpResp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return ErrJobNotFound
+	default:
+		return fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+}
