@@ -20,7 +20,7 @@ type QueueStats struct {
 
 func (s *Store) GetStats(ctx context.Context, queueName string) (*QueueStats, error) {
 	query := `
-		select queue,
+		select $1 as queue,
 			count(*) filter (where status='pending') as pending,
 			count(*) filter (where status='running') as running,
 		 	count(*) filter (where status='completed') as completed,
@@ -32,6 +32,11 @@ func (s *Store) GetStats(ctx context.Context, queueName string) (*QueueStats, er
 	`
 	args := []any{queueName}
 	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query queue stats: %w", err)
+	}
+	defer rows.Close()
+
 	stat, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[QueueStats])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

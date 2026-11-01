@@ -21,3 +21,9 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		pool: pool,
 	}, nil
 }
+
+func (s *Store) Close() {
+	if s.pool != nil {
+		s.pool.Close()
+	}
+}

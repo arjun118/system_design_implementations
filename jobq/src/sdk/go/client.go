@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +55,46 @@ func (c *Client) SubmitJob(ctx context.Context, req SubmitRequest) (uuid.UUID, e
 	return jobCreationResponse.ID, nil
 }
 
-func (c *Client) GetJob(ctx context.Context, ID uuid.UUID) {
+func (c *Client) GetJob(ctx context.Context, ID uuid.UUID) (*Job, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/jobs/"+ID.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create http request, %w", err)
+	}
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request, %w", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+	var job Job
+	if err := json.NewDecoder(httpResp.Body).Decode(&job); err != nil {
+		return nil, fmt.Errorf("failed to decode job details response: %w", err)
+	}
+	return &job, nil
+}
 
+func (c *Client) GetQueueStats(ctx context.Context, queueName string) (*QueueStats, error) {
+	endpoint, err := url.JoinPath(c.baseURL, "v1", "queues", queueName, "stats")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse endpoint specific url, %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create http request, %w", err)
+	}
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request, %w", err)
+	}
+	defer httpResp.Body.Close()
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+	var stats QueueStats
+	if err := json.NewDecoder(httpResp.Body).Decode(&stats); err != nil {
+		return nil, fmt.Errorf("failed to decode job details response: %w", err)
+	}
+	return &stats, nil
 }

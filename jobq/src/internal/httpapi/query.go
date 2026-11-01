@@ -37,7 +37,7 @@ func (s *Server) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) GetQueueStats(w http.ResponseWriter, r *http.Request) {
-	queueName := chi.URLParam(r, "queue")
+	queueName := chi.URLParam(r, "name")
 	if !validator.IsValidQueueName(queueName) {
 		s.badRequestResponse(w, r, fmt.Errorf("invalid queue name: only alphanumeric, hyphens, and underscores allowed"))
 		return
