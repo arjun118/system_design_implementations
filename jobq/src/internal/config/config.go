@@ -1,7 +1,5 @@
 package config
 
-import "time"
-
 type DBConfig struct {
 	DatabaseURL string
 	MaxOpenConn int
@@ -13,6 +11,8 @@ type Config struct {
 	DB                      DBConfig
 	MinLeaseDurationSeconds int
 	MaxLeaseDurationSeconds int
+	ReaperPollDuration      int
+	LeaseDurationIncrement  int
 }
 
 func Load() *Config {
@@ -23,7 +23,9 @@ func Load() *Config {
 			MaxIdleConn: getEnvInt("DB_MAX_IDLE_CONNS", 25),
 			MaxIdleTime: getEnv("DB_MAX_IDLE_TIME", "15m"),
 		},
-		MinLeaseDurationSeconds: 5,
-		MaxLeaseDurationSeconds: int(10 * time.Minute),
+		MinLeaseDurationSeconds: getEnvInt("MIN_LEASE_DURATION", 5),
+		MaxLeaseDurationSeconds: getEnvInt("MAX_LEASE_DURATION", 10*60),
+		ReaperPollDuration:      getEnvInt("REAPER_POLL_DURATION", 5),
+		LeaseDurationIncrement:  getEnvInt("LEASE_DURATION_INCREMENT", 30),
 	}
 }

@@ -26,7 +26,7 @@ func NewClient(BaseURL string) *Client {
 	}
 }
 
-func (c *Client) SubmitJob(ctx context.Context, req SubmitRequest) (uuid.UUID, error) {
+func (c *Client) SubmitJob(ctx context.Context, req SubmitJobRequest) (uuid.UUID, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to marshall submit request paylaod, %w", err)
@@ -99,9 +99,11 @@ func (c *Client) GetQueueStats(ctx context.Context, queueName string) (*QueueSta
 	return &stats, nil
 }
 
-func (c *Client) Claim(ctx context.Context, queues []string) (*Job, error) {
-	body, err := json.Marshal(ClaimRequest{
-		Queues: queues,
+func (c *Client) Claim(ctx context.Context, queues []string, workerID string, leaseDurationSeconds int) (*Job, error) {
+	body, err := json.Marshal(ClaimJobRequest{
+		Queues:               queues,
+		WorkerID:             workerID,
+		LeaseDurationSeconds: leaseDurationSeconds,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request body, %w", err)
@@ -136,15 +138,22 @@ func (c *Client) Claim(ctx context.Context, queues []string) (*Job, error) {
 
 }
 
-func (c *Client) Ack(ctx context.Context, jobID uuid.UUID) error {
+func (c *Client) Ack(ctx context.Context, jobID uuid.UUID, leaseToken int) error {
+	body, err := json.Marshal(AckRequest{
+		LeaseToken: leaseToken,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create request body, %w", err)
+	}
 	endpoint, err := url.JoinPath(c.baseURL, "v1", "jobs", jobID.String(), "ack")
 	if err != nil {
 		return fmt.Errorf("failed to parse endpoint specific url, %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create http request, %w", err)
 	}
+	httpReq.Header.Set("Content-Type", "application/json")
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to send request, %w", err)
@@ -156,20 +165,35 @@ func (c *Client) Ack(ctx context.Context, jobID uuid.UUID) error {
 		return nil
 	case http.StatusNotFound:
 		return ErrJobNotFound
+	case http.StatusConflict:
+		return ErrStaleLeaseToken
 	default:
 		return fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
 	}
 }
 
-func (c *Client) NAck(ctx context.Context, jobID uuid.UUID, token int, workerError error, permanent bool) error {
+func (c *Client) NAck(ctx context.Context, jobID uuid.UUID, leaseToken int, workerError error, permanent bool) error {
+	errMsg := ""
+	if workerError != nil {
+		errMsg = workerError.Error()
+	}
+	body, err := json.Marshal(NAckRequest{
+		LeaseToken: leaseToken,
+		Error:      errMsg,
+		Permanent:  permanent,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create request body, %w", err)
+	}
 	endpoint, err := url.JoinPath(c.baseURL, "v1", "jobs", jobID.String(), "nack")
 	if err != nil {
 		return fmt.Errorf("failed to parse endpoint specific url, %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create http request, %w", err)
 	}
+	httpReq.Header.Set("Content-Type", "application/json")
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to send request, %w", err)
@@ -180,7 +204,44 @@ func (c *Client) NAck(ctx context.Context, jobID uuid.UUID, token int, workerErr
 		return nil
 	case http.StatusNotFound:
 		return ErrJobNotFound
+	case http.StatusConflict:
+		return ErrStaleLeaseToken
 	default:
 		return fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+}
+
+func (c *Client) Heartbeat(ctx context.Context, jobID uuid.UUID, leaseToken int, workerID string, leaseDuration int) error {
+	body, err := json.Marshal(HeartBeatRequest{
+		WorkerID:             workerID,
+		LeaseToken:           leaseToken,
+		LeaseDurationSeconds: leaseDuration,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create request body, %w", err)
+	}
+	endpoint, err := url.JoinPath(c.baseURL, "v1", "jobs", jobID.String(), "heartbeat")
+	if err != nil {
+		return fmt.Errorf("failed to parse endpoint specific url, %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create http request, %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send request, %w", err)
+	}
+	defer httpResp.Body.Close()
+	switch httpResp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return ErrJobNotFound
+	case http.StatusConflict:
+		return ErrStaleLeaseToken
+	default:
+		return fmt.Errorf("unexpected response code: %v", httpResp.StatusCode)
 	}
 }

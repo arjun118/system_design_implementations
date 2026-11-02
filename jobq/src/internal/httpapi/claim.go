@@ -14,7 +14,7 @@ func (s *Server) Claim(w http.ResponseWriter, r *http.Request) {
 	if !s.readJSONAndValidate(w, r, s.config, &input) {
 		return
 	}
-	job, err := s.store.ClaimPendingJob(r.Context(), input.Queues)
+	job, err := s.store.ClaimPendingJob(r.Context(), input.Queues, input.WorkerID, input.LeaseDurationSeconds)
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrNoJobAvailable):

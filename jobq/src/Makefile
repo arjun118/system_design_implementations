@@ -6,7 +6,7 @@ MIGRATE=docker compose run --rm migrate \
 	-database "$(DATABASE_URL)"
 
 migrate-create:
-	migrate create -ext sql -dir ./migrations -seq $(name)
+	migrate create -ext=.sql -dir ./migrations -seq $(name)
 
 migrate-up:
 	$(MIGRATE) up

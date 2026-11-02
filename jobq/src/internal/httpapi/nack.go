@@ -17,12 +17,17 @@ func (s *Server) NAck(w http.ResponseWriter, r *http.Request) {
 		s.badRequestResponse(w, r, fmt.Errorf("invalid job id: must be a valid uuid"))
 		return
 	}
-
-	err = s.store.MarkFailure(r.Context(), jobID)
+	var input NAckRequest
+	if !s.readJSONAndValidate(w, r, s.config, &input) {
+		return
+	}
+	err = s.store.MarkFailure(r.Context(), jobID, input.LeaseToken, input.Error, input.Permanent)
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrJobNotFound):
 			s.notFoundResponse(w, r)
+		case errors.Is(err, storage.ErrStaleLeaseToken):
+			w.WriteHeader(http.StatusConflict)
 		default:
 			s.serverErrorResponse(w, r, err)
 		}
@@ -30,5 +35,4 @@ func (s *Server) NAck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-
 }
