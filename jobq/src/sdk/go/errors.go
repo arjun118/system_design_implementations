@@ -7,4 +7,5 @@ var (
 	ErrJobNotFound    = errors.New("no job found with that id")
 
 	ErrStaleLeaseToken = errors.New("stale lease token")
+	ErrJobNotDead      = errors.New("job is not in dead status")
 )

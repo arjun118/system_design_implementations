@@ -16,7 +16,7 @@ import (
 
 func main() {
 	appLogger := logger.New(os.Stdout)
-	cfg := config.Load()
+	cfg := config.Load(appLogger)
 	pgPool, err := storage.NewStore(cfg)
 	if err != nil {
 		appLogger.Fatal().Err(err).Msg("failed to initiate db pool")

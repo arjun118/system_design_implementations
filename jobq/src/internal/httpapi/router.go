@@ -27,5 +27,9 @@ func (s *Server) setupRoutes() {
 	r.Post("/v1/jobs/{id}/ack", s.Ack)
 	r.Post("/v1/jobs/{id}/nack", s.NAck)
 	r.Post("/v1/jobs/{id}/heartbeat", s.ExtendLease)
+
+	// dead-letter endpoints
+	r.Post("/v1/jobs/{id}/retry", s.RetryDeadJob)
+	r.Get("/v1/queues/{name}/dead-letters", s.GetDeadLetteredJobs)
 	s.router = r
 }

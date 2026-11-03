@@ -9,11 +9,13 @@ import (
 )
 
 type SubmitJobRequest struct {
-	Queue       string          `json:"queue,omitempty"`
-	JobType     string          `json:"job_type"`
-	Payload     json.RawMessage `json:"payload"`
-	Priority    int             `json:"priority,omitempty"`
-	MaxAttempts int             `json:"max_attempts,omitempty"`
+	Queue        string          `json:"queue,omitempty"`
+	JobType      string          `json:"job_type"`
+	Payload      json.RawMessage `json:"payload"`
+	Priority     int             `json:"priority,omitempty"`
+	MaxAttempts  int             `json:"max_attempts,omitempty"`
+	RunAt        *time.Time      `json:"run_at,omitempty"`
+	DelaySeconds int             `json:"delay_seconds,omitempty"`
 }
 
 type SubmitRequest = SubmitJobRequest

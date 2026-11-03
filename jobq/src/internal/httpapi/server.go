@@ -20,7 +20,7 @@ func NewServer(logger zerolog.Logger, store *storage.Store) *Server {
 	s := &Server{
 		logger: logger,
 		store:  store,
-		config: config.Load(),
+		config: config.Load(logger),
 	}
 	s.setupRoutes()
 	return s

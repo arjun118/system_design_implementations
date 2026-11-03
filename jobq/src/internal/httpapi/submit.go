@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"time"
 
 	"arjun118.github.io/jobq/internal/storage"
 )
@@ -11,12 +12,20 @@ func (s *Server) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	if !s.readJSONAndValidate(w, r, s.config, &input) {
 		return
 	}
+	var runAt time.Time
+	if input.RunAt != nil {
+		runAt = *input.RunAt
+	} else if input.DelaySeconds > 0 {
+		runAt = time.Now().Add(time.Duration(input.DelaySeconds) * time.Second)
+	}
+
 	jobDetails := &storage.Job{
 		Queue:       input.Queue,
 		JobType:     input.JobType,
 		Payload:     input.Payload,
 		Priority:    input.Priority,
 		MaxAttempts: input.MaxAttempts,
+		RunAt:       runAt,
 	}
 	err := s.store.CreateJob(r.Context(), jobDetails)
 	if err != nil {

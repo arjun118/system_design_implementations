@@ -245,3 +245,60 @@ func (c *Client) Heartbeat(ctx context.Context, jobID uuid.UUID, leaseToken int,
 		return fmt.Errorf("unexpected response code: %v", httpResp.StatusCode)
 	}
 }
+
+func (c *Client) RetryDeadJob(ctx context.Context, jobID uuid.UUID) error {
+	endpoint, err := url.JoinPath(c.baseURL, "v1", "jobs", jobID.String(), "retry")
+	if err != nil {
+		return fmt.Errorf("failed to parse retry endpoint url: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create retry request: %w", err)
+	}
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send retry request: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	switch httpResp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return ErrJobNotFound
+	case http.StatusConflict:
+		return ErrJobNotDead
+	default:
+		return fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+}
+
+func (c *Client) GetDeadLetteredJobs(ctx context.Context, queueName string) ([]*Job, error) {
+	endpoint, err := url.JoinPath(c.baseURL, "v1", "queues", queueName, "dead-letters")
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse dead-letters endpoint url: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dead-letters request: %w", err)
+	}
+
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send dead-letters request: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
+	}
+
+	var jobs []*Job
+	if err := json.NewDecoder(httpResp.Body).Decode(&jobs); err != nil {
+		return nil, fmt.Errorf("failed to decode dead-lettered jobs: %w", err)
+	}
+	return jobs, nil
+}

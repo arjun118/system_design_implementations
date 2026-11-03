@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"arjun118.github.io/jobq/internal/scheduler"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -36,12 +37,16 @@ func (s *Store) CreateJob(ctx context.Context, jobDetails *Job) error {
 	if jobDetails.MaxAttempts <= 0 {
 		jobDetails.MaxAttempts = 5
 	}
+	runAt := time.Now()
+	if !jobDetails.RunAt.IsZero() {
+		runAt = jobDetails.RunAt
+	}
 	query := `
-	INSERT into jobs (queue,job_type, payload,priority, max_attempts)
-	values ($1,$2,$3,$4,$5)
+	INSERT into jobs (queue, job_type, payload, priority, max_attempts, run_at)
+	values ($1, $2, $3, $4, $5, $6)
 	returning id;
 	`
-	args := []any{jobDetails.Queue, jobDetails.JobType, jobDetails.Payload, jobDetails.Priority, jobDetails.MaxAttempts}
+	args := []any{jobDetails.Queue, jobDetails.JobType, jobDetails.Payload, jobDetails.Priority, jobDetails.MaxAttempts, runAt}
 	err := s.pool.QueryRow(ctx, query, args...).Scan(&jobDetails.ID)
 	if err != nil {
 		return fmt.Errorf("failed to create job: %w", err)
@@ -113,41 +118,72 @@ func (s *Store) MarkComplete(ctx context.Context, jobID uuid.UUID, leaseToken in
 	return nil
 }
 
-func (s *Store) MarkFailure(ctx context.Context, jobID uuid.UUID, leaseToken int, error string, permanent bool) error {
-	// need to add backoff here and update run_at
-	query := `
-	update jobs
-	set status = case
-			when $4 = true or attempts >= max_attempts then 'dead'
-			else 'pending'
-		end,
-		last_error = $3,
-		lease_until =  NULL,
-		updated_at = now()
-	where id=$1 and lease_token=$2 and status='running';
+func (s *Store) MarkFailure(ctx context.Context, jobID uuid.UUID, leaseToken int, errMsg string, permanent bool) error {
+	// 1. Authoritative check: fetch current attempts and verify lease_token + status
+	var attempts, maxAttempts int
+	checkQuery := `
+		SELECT attempts, max_attempts
+		FROM jobs
+		WHERE id = $1 AND lease_token = $2 AND status = 'running';
 	`
-	args := []any{jobID, leaseToken, error, permanent}
-	result, err := s.pool.Exec(ctx, query, args...)
+	err := s.pool.QueryRow(ctx, checkQuery, jobID, leaseToken).Scan(&attempts, &maxAttempts)
 	if err != nil {
-		return fmt.Errorf("failed to mark job failure, %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			var currentToken int
+			var status string
+			err := s.pool.QueryRow(ctx, "SELECT lease_token, status FROM jobs WHERE id = $1", jobID).
+				Scan(&currentToken, &status)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ErrJobNotFound
+				}
+				return err
+			}
+			return ErrStaleLeaseToken
+		}
+		return fmt.Errorf("failed to query job attempts: %w", err)
+	}
+
+	// 2. Decide next state in Go
+	if permanent || attempts >= maxAttempts {
+		updateQuery := `
+			UPDATE jobs
+			SET status = 'dead',
+			    last_error = $2,
+			    lease_owner = NULL,
+			    lease_until = NULL,
+			    updated_at = now()
+			WHERE id = $1 AND lease_token = $3 AND status = 'running';
+		`
+		result, err := s.pool.Exec(ctx, updateQuery, jobID, errMsg, leaseToken)
+		if err != nil {
+			return fmt.Errorf("failed to mark job dead: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			return ErrStaleLeaseToken
+		}
+		return nil
+	}
+
+	// 3. Compute exponential backoff with full jitter in Go
+	delay := scheduler.ComputeBackoff(attempts, 0, 0, s.config)
+
+	// 4. Update status back to pending with calculated delay
+	updateQuery := `
+		UPDATE jobs
+		SET status = 'pending',
+		    run_at = now() + ($2 * INTERVAL '1 second'),
+		    last_error = $3,
+		    lease_owner = NULL,
+		    lease_until = NULL,
+		    updated_at = now()
+		WHERE id = $1 AND lease_token = $4 AND status = 'running';
+	`
+	result, err := s.pool.Exec(ctx, updateQuery, jobID, delay.Seconds(), errMsg, leaseToken)
+	if err != nil {
+		return fmt.Errorf("failed to reschedule failed job: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		var currentToken int
-		var status string
-		err := s.pool.QueryRow(ctx, "SELECT lease_token, status FROM jobs WHERE id = $1", jobID).
-			Scan(&currentToken, &status)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return ErrJobNotFound
-			}
-			return err
-		}
-		// s.logger.Warn().
-		// 	Str("job_id", jobID.String()).
-		// 	Int("received_token", leaseToken).
-		// 	Int("current_token", currentToken).
-		// 	Str("current_status", status).
-		// 	Msg("rejected stale acknowledgment")
 		return ErrStaleLeaseToken
 	}
 
@@ -255,5 +291,71 @@ func (s *Store) ExtendLease(ctx context.Context, jobId uuid.UUID, leaseToken int
 		}
 		return ErrStaleLeaseToken
 	}
+	return nil
+}
+func (s *Store) GetDeadLetteredJobs(ctx context.Context, queueName string) ([]*Job, error) {
+	query := `
+           SELECT
+               id,
+               queue,
+               job_type,
+               payload,
+               status,
+               priority,
+               attempts,
+               max_attempts,
+               lease_owner,
+               lease_until,
+               lease_token,
+               last_error,
+               run_at,
+               created_at,
+               updated_at
+           FROM jobs
+           WHERE queue = $1 AND status = 'dead'
+           ORDER BY updated_at DESC
+           LIMIT 100;
+       `
+	rows, err := s.pool.Query(ctx, query, queueName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query dead-lettered jobs: %w", err)
+	}
+
+	jobs, err := pgx.CollectRows(rows, pgx.RowToAddrOfStructByName[Job])
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan dead-lettered jobs: %w", err)
+	}
+
+	return jobs, nil
+}
+
+func (s *Store) ResetDeadJob(ctx context.Context, id uuid.UUID) error {
+	query := `
+          UPDATE jobs
+          SET status = 'pending',
+              attempts = 0,
+              lease_owner = NULL,
+              lease_until = NULL,
+              lease_token = 0,
+              run_at = now(),
+              updated_at = now()
+          WHERE id = $1 AND status = 'dead';
+      `
+	result, err := s.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("failed to reset dead job: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		var status string
+		err := s.pool.QueryRow(ctx, "SELECT status FROM jobs WHERE id = $1", id).Scan(&status)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrJobNotFound
+			}
+			return fmt.Errorf("failed to check job status: %w", err)
+		}
+		return ErrJobNotDead
+	}
+
 	return nil
 }

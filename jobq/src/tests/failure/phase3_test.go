@@ -40,7 +40,7 @@ func newTestServer(t testing.TB) *testServer {
 		dbURL = "postgres://jobq:durable@localhost:5433/jobq?sslmode=disable"
 	}
 
-	cfg := config.Load()
+	cfg := config.Load(zerolog.Nop())
 	cfg.DB.DatabaseURL = dbURL
 	cfg.MinLeaseDurationSeconds = 1
 

@@ -59,11 +59,13 @@ type AcceptJobResponse struct {
 	ID uuid.UUID `json:"id"`
 }
 type SubmitJobRequest struct {
-	Queue       string          `json:"queue"`
-	JobType     string          `json:"job_type"`
-	Payload     json.RawMessage `json:"payload"`
-	Priority    int             `json:"priority"`
-	MaxAttempts int             `json:"max_attempts"`
+	Queue        string          `json:"queue"`
+	JobType      string          `json:"job_type"`
+	Payload      json.RawMessage `json:"payload"`
+	Priority     int             `json:"priority"`
+	MaxAttempts  int             `json:"max_attempts"`
+	RunAt        *time.Time      `json:"run_at,omitempty"`
+	DelaySeconds int             `json:"delay_seconds,omitempty"`
 }
 
 func (r SubmitJobRequest) Validate(v *validator.Validator, cfg *config.Config) {

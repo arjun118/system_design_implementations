@@ -9,7 +9,8 @@ import (
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	config *config.Config
 }
 
 func NewStore(cfg *config.Config) (*Store, error) {
@@ -18,7 +19,8 @@ func NewStore(cfg *config.Config) (*Store, error) {
 		return nil, fmt.Errorf("failed to initiate db pool, %w", err)
 	}
 	return &Store{
-		pool: pool,
+		pool:   pool,
+		config: cfg,
 	}, nil
 }
 
