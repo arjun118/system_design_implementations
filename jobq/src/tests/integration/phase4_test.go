@@ -32,33 +32,30 @@ func TestPhase4(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		// Fail 1st time
-		j1, err := client.Claim(ctx, []string{queue}, "w1", 30)
-		require.NoError(t, err)
-		err = client.NAck(ctx, j1.ID, j1.LeaseToken, fmt.Errorf("fail 1"), false)
-		require.NoError(t, err)
+		// Test 3 failure progressions and verify exponential ceiling for each
+		for attempt := 1; attempt <= 3; attempt++ {
+			// Fast forward run_at so it can be claimed
+			_, err = ts.store.Pool().Exec(ctx, "UPDATE jobs SET run_at = now() WHERE id = $1", jobID)
+			require.NoError(t, err)
 
-		dbJob1, err := client.GetJob(ctx, jobID)
-		require.NoError(t, err)
-		require.Equal(t, "pending", dbJob1.Status)
-		require.Equal(t, 1, dbJob1.Attempts)
-		// RunAt should be in the future (within max delay)
-		require.True(t, dbJob1.RunAt.After(time.Now().Add(-100*time.Millisecond)))
+			j, err := client.Claim(ctx, []string{queue}, "w1", 30)
+			require.NoError(t, err)
 
-		// Force run_at to now for test speed
-		_, err = ts.store.Pool().Exec(ctx, "UPDATE jobs SET run_at = now() WHERE id = $1", jobID)
-		require.NoError(t, err)
+			beforeNack := time.Now()
+			err = client.NAck(ctx, j.ID, j.LeaseToken, fmt.Errorf("fail attempt %d", attempt), false)
+			require.NoError(t, err)
 
-		// Fail 2nd time
-		j2, err := client.Claim(ctx, []string{queue}, "w1", 30)
-		require.NoError(t, err)
-		err = client.NAck(ctx, j2.ID, j2.LeaseToken, fmt.Errorf("fail 2"), false)
-		require.NoError(t, err)
+			dbJob, err := client.GetJob(ctx, jobID)
+			require.NoError(t, err)
+			require.Equal(t, "pending", dbJob.Status)
+			require.Equal(t, attempt, dbJob.Attempts)
 
-		dbJob2, err := client.GetJob(ctx, jobID)
-		require.NoError(t, err)
-		require.Equal(t, "pending", dbJob2.Status)
-		require.Equal(t, 2, dbJob2.Attempts)
+			// Full Jitter ceiling: BaseDelay * 2^attempt
+			ceiling := 1 * time.Second * (1 << attempt)
+			delay := dbJob.RunAt.Sub(beforeNack)
+			require.GreaterOrEqual(t, delay, -50*time.Millisecond, "delay must not be in the past")
+			require.LessOrEqual(t, delay, ceiling+500*time.Millisecond, "delay must be bounded by exponential ceiling")
+		}
 	})
 
 	t.Run("TestRetry_MaxAttempts", func(t *testing.T) {
@@ -125,25 +122,11 @@ func TestPhase4(t *testing.T) {
 			_ = worker.Run(runCtx)
 		}()
 
-		// Helper loop to fast-forward run_at if backoff is pending
-		go func() {
-			ticker := time.NewTicker(50 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-runCtx.Done():
-					return
-				case <-ticker.C:
-					_, _ = ts.store.Pool().Exec(ctx, "UPDATE jobs SET run_at = now() WHERE id = $1 AND status = 'pending' AND run_at > now()", jobID)
-				}
-			}
-		}()
-
-		// Job completes on third attempt
+		// Job completes on third attempt naturally after waiting for backoff run_at
 		require.Eventually(t, func() bool {
 			job, err := client.GetJob(ctx, jobID)
 			return err == nil && job.Status == "completed"
-		}, 5*time.Second, 100*time.Millisecond)
+		}, 10*time.Second, 100*time.Millisecond)
 
 		finalJob, err := client.GetJob(ctx, jobID)
 		require.NoError(t, err)
